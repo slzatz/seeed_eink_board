@@ -1,0 +1,47 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// WiFi Configuration
+// Copy this file to config.h and update with your network credentials
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+// Image Server Configuration
+// NOTE: These are now configurable at runtime via the web interface!
+// These values are only used as initial defaults on first boot.
+// To change the server, hold Button 1 (GPIO2) during boot to enter config mode.
+//
+// Default values are defined in config_manager.h:
+//   DEFAULT_SERVER_HOST "192.168.86.100"
+//   DEFAULT_SERVER_PORT 5000
+//   DEFAULT_IMAGE_ENDPOINT "/image_packed"
+//   DEFAULT_SLEEP_MINUTES 15
+
+// Display Pin Configuration (EE02 Board)
+// These pins are fixed for the EE02 board - do not change
+#define PIN_SPI_CLK     7
+#define PIN_SPI_MOSI    9
+#define PIN_CS_MASTER   44    // Master controller (top half)
+#define PIN_CS_SLAVE    41    // Slave controller (bottom half)
+#define PIN_DC          10
+#define PIN_RESET       38
+#define PIN_BUSY        4     // Note: Busy signal is inverted on this board
+#define PIN_POWER       43    // Display power control
+
+// Button Pin Configuration (active LOW - directly connected to GND when pressed)
+#define PIN_BUTTON_1    2     // Config mode: hold during boot to enter setup
+#define PIN_BUTTON_2    1     // Available for future use
+#define PIN_BUTTON_3    3     // Available for future use
+
+// Display Dimensions
+#define DISPLAY_WIDTH   1600
+#define DISPLAY_HEIGHT  1200
+#define BUFFER_SIZE     960000  // (1600 * 1200) / 2 bytes (4bpp)
+
+// HTTP timeout for image fetch (in milliseconds)
+#define HTTP_TIMEOUT_MS 30000
+
+// WiFi connection timeout (in milliseconds)
+#define WIFI_TIMEOUT_MS 30000
+
+#endif // CONFIG_H

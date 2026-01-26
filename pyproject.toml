@@ -1,0 +1,14 @@
+[project]
+name = "seeed-eink-board"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "mitmproxy>=12.2.1",
+    "flask>=3.0.0",
+    "pillow>=10.0.0",
+    "requests>=2.31.0",
+    "wand>=0.6.0",
+    "platformio>=6.1.18",
+]
