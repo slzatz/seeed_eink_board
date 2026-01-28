@@ -32,3 +32,6 @@ config.h
 # OS files
 .DS_Store
 Thumbs.db
+
+# Image server state
+.eink_rotation_state.json

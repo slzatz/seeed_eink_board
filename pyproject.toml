@@ -8,6 +8,7 @@ dependencies = [
     "mitmproxy>=12.2.1",
     "flask>=3.0.0",
     "pillow>=10.0.0",
+    "pillow-heif>=0.16.0",
     "requests>=2.31.0",
     "wand>=0.6.0",
     "platformio>=6.1.18",
