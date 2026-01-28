@@ -24,7 +24,6 @@ import random
 import os
 import hashlib
 import json
-import time
 
 # Try to import PIL for image processing
 try:
@@ -109,10 +108,9 @@ class ImageRotator:
     def __init__(self, images_dir: str, state_file: str):
         self.images_dir = images_dir
         self.state_file = state_file
-        self.last_scan_time = 0.0
-        self.image_list = []       # Sorted list of image filenames
+        self.image_list = []
         self.current_index = 0
-        self.last_returned = None  # Track the last returned image
+        self.last_returned = None
         self._load_state()
 
     def _load_state(self):
@@ -122,10 +120,8 @@ class ImageRotator:
                 with open(self.state_file, 'r') as f:
                     state = json.load(f)
                 self.current_index = state.get('current_index', 0)
-                self.last_scan_time = state.get('last_scan_time', 0.0)
-                self.image_list = state.get('image_list', [])
                 self.last_returned = state.get('last_returned', None)
-                print(f"Loaded rotation state: index={self.current_index}, images={len(self.image_list)}")
+                print(f"Loaded rotation state: index={self.current_index}, last={self.last_returned}")
             except (json.JSONDecodeError, IOError) as e:
                 print(f"Error loading state file: {e}")
                 self._reset_state()
@@ -136,8 +132,6 @@ class ImageRotator:
         """Save rotation state to JSON file."""
         state = {
             'current_index': self.current_index,
-            'last_scan_time': self.last_scan_time,
-            'image_list': self.image_list,
             'last_returned': self.last_returned
         }
         try:
@@ -149,88 +143,44 @@ class ImageRotator:
     def _reset_state(self):
         """Reset to initial state."""
         self.current_index = 0
-        self.last_scan_time = 0.0
         self.image_list = []
         self.last_returned = None
 
-    def _scan_directory(self) -> tuple[list[str], list[str]]:
-        """
-        Scan directory for images.
-
-        Returns:
-            tuple: (all_images, new_images) - sorted lists of filenames
-        """
+    def _scan_directory(self) -> list[str]:
+        """Scan directory and return sorted list of image filenames."""
         if not os.path.isdir(self.images_dir):
-            return [], []
+            return []
 
-        all_images = []
-        new_images = []
-
+        images = []
         try:
             for entry in os.scandir(self.images_dir):
-                # Resolve symlinks
                 real_path = os.path.realpath(entry.path)
-
                 if not os.path.isfile(real_path):
                     continue
-
-                # Check extension
                 _, ext = os.path.splitext(entry.name.lower())
                 if ext not in SUPPORTED_EXTENSIONS:
                     continue
-
-                all_images.append(entry.name)
-
-                # Check if this is a new image (added since last scan)
-                try:
-                    mtime = os.path.getmtime(real_path)
-                    if mtime > self.last_scan_time:
-                        new_images.append(entry.name)
-                except OSError:
-                    continue
-
+                images.append(entry.name)
         except OSError as e:
             print(f"Error scanning directory {self.images_dir}: {e}")
-            return [], []
+            return []
 
-        # Sort alphabetically for consistent order
-        all_images.sort()
-        new_images.sort()
-
-        return all_images, new_images
+        images.sort()
+        return images
 
     def get_next_image(self) -> str | None:
-        """
-        Get path to next image, prioritizing newly added images.
-
-        Returns:
-            str | None: Full path to the next image, or None if no images available
-        """
-        all_images, new_images = self._scan_directory()
-
-        if not all_images:
+        """Get path to next image in rotation."""
+        images = self._scan_directory()
+        if not images:
             return None
 
-        # Update our image list
-        self.image_list = all_images
-
-        # If new images detected, return the first new one
-        if new_images:
-            print(f"New images detected: {new_images}")
-            self.last_scan_time = time.time()
-            image_name = new_images[0]
-            self.last_returned = image_name
-            self._save_state()
-            return os.path.join(self.images_dir, image_name)
-
-        # Normal rotation - wrap around if needed
-        if self.current_index >= len(self.image_list):
+        # Handle case where image list changed (files added/removed)
+        if self.current_index >= len(images):
             self.current_index = 0
 
-        image_name = self.image_list[self.current_index]
+        image_name = images[self.current_index]
         self.last_returned = image_name
-        self.current_index += 1
-        self.last_scan_time = time.time()
+        self.current_index = (self.current_index + 1) % len(images)
         self._save_state()
 
         return os.path.join(self.images_dir, image_name)
@@ -248,13 +198,13 @@ class ImageRotator:
 
     def get_status(self) -> dict:
         """Get current rotation status."""
-        all_images, _ = self._scan_directory()
+        images = self._scan_directory()
         return {
             'current_image': self.last_returned,
             'current_index': self.current_index,
-            'total_images': len(all_images),
+            'total_images': len(images),
             'images_dir': self.images_dir,
-            'image_list': all_images
+            'image_list': images
         }
 
 
