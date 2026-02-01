@@ -140,16 +140,22 @@ You should see progress bars and finally:
 ========================= [SUCCESS] Took XX.XX seconds =========================
 ```
 
-### Step 10: Prepare an Image
+### Step 10: Prepare Images
 
 Go back to the project root directory:
 ```bash
 cd ..
 ```
 
-Place a JPEG image in the project folder. The image will be automatically resized and converted to the display's 6-color palette.
+Create the images directory and add some images:
+```bash
+mkdir -p images/default
+cp your_photo.jpg images/default/
+```
 
-Create a symbolic link to image.jpg (or just rename the file to `image.jpg`):
+Images will be automatically resized and converted to the display's 6-color palette. You can add multiple images and they'll rotate on each refresh.
+
+For device-specific images, see the "Multiple Boards with Different Images" section below.
 
 ### Step 11: Start the Image Server
 
@@ -159,10 +165,13 @@ uv run python image_server.py
 
 You should see:
 ```
-Starting E-Ink Image Server...
+Starting E-Ink Image Server (Multi-Device)...
 PIL available: True
+HEIC support: True
 Default image: image.jpg
+Images directory: /path/to/seeed_eink_board/images
 Display size: 1600x1200
+Device directories found: default, d0cf1326f7e8
  * Serving Flask app 'image_server'
  * Running on all addresses (0.0.0.0)
  * Running on http://127.0.0.1:5000
@@ -221,6 +230,7 @@ Connecting to WiFi: YourNetwork
 .
 Connected! IP: 192....
 Checking image hash at: http://192.168.86.34:5000/hash
+Sending X-Device-MAC: d0cf1326f7e8
 Last known hash: (none)
 Server hash: 942d3cfc05c8fa41
 Image changed - will download new image
@@ -297,12 +307,64 @@ Simply replace the `image.jpg` file and wait for the next refresh cycle (default
 
 - JPEG (.jpg, .jpeg)
 - PNG (.png)
-- Most common image formats
+- HEIC (.heic) - iPhone photos work directly
+- GIF, BMP, WebP
 
 The image will be automatically:
 - Resized to fit the display (1200x1600 pixels, portrait)
 - Converted to the 6-color palette with dithering
 - Rotated if necessary for correct orientation
+
+---
+
+## Multiple Boards with Different Images
+
+You can run multiple EE02 boards from a single image server, each displaying different content. Each board is identified by its MAC address.
+
+### Directory Structure
+
+```
+seeed_eink_board/
+└── images/
+    ├── default/          # Fallback for unknown devices
+    │   ├── image1.jpg
+    │   └── image2.png
+    ├── d0cf1326f7e8/     # First board (MAC without separators)
+    │   ├── photo1.jpg
+    │   └── photo2.heic
+    └── aabbccddeeff/     # Second board
+        └── artwork.png
+```
+
+### Finding Your Board's MAC Address
+
+1. Enter configuration mode (hold Button 1 during reset)
+2. Connect to the configuration page
+3. The **Device Info** section shows the MAC address and IP
+4. Use the MAC address (lowercase, no colons) as the directory name
+
+### How It Works
+
+1. Each board sends its MAC address with every request via the `X-Device-MAC` header
+2. The server looks for `images/<mac-address>/` directory
+3. If not found, falls back to `images/default/`
+4. Each board maintains its own rotation state independently
+
+### Example Setup for Two Boards
+
+```bash
+# Create directories
+mkdir -p images/default
+mkdir -p images/d0cf1326f7e8    # Kitchen display
+mkdir -p images/a1b2c3d4e5f6    # Living room display
+
+# Add images for each
+cp kitchen_photos/*.jpg images/d0cf1326f7e8/
+cp artwork/*.png images/a1b2c3d4e5f6/
+cp fallback.jpg images/default/
+```
+
+Each board will cycle through its own set of images independently.
 
 ---
 
@@ -342,7 +404,10 @@ The display is designed for portrait orientation with the board at the bottom. I
 seeed_eink_board/
 ├── README.md              # This file
 ├── image_server.py        # Python server that serves images to the display
-├── image.jpg              # Your image (create this)
+├── image.jpg              # Fallback image (optional)
+├── images/                # Multi-device image directories
+│   ├── default/           # Fallback for unknown devices
+│   └── d0cf1326f7e8/      # Device-specific (MAC address)
 ├── firmware/              # ESP32 firmware
 │   ├── platformio.ini     # Build configuration
 │   ├── README.md          # Detailed firmware documentation

@@ -21,6 +21,19 @@ RTC_DATA_ATTR char lastImageHash[17] = {0};  // 16 chars + null terminator
 // Configuration mode: hold Button 1 during boot for 1 second
 #define CONFIG_BUTTON_HOLD_MS 1000
 
+/**
+ * Get the WiFi MAC address as a clean string (lowercase, no separators).
+ * Used to identify this device to the image server.
+ */
+String getMACAddressClean() {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char macStr[13];
+    snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(macStr);
+}
+
 void printWakeupReason() {
     esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
     switch (wakeupReason) {
@@ -107,6 +120,11 @@ bool checkImageChanged() {
     http.begin(hashUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
 
+    // Add device identification header
+    String macAddress = getMACAddressClean();
+    http.addHeader("X-Device-MAC", macAddress);
+    Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
+
     int httpCode = http.GET();
 
     if (httpCode != HTTP_CODE_OK) {
@@ -155,6 +173,9 @@ bool fetchAndDisplayImage() {
     HTTPClient http;
     http.begin(url);
     http.setTimeout(HTTP_TIMEOUT_MS);
+
+    // Add device identification header
+    http.addHeader("X-Device-MAC", getMACAddressClean());
 
     int httpCode = http.GET();
 

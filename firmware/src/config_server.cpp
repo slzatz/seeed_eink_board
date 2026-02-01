@@ -1,5 +1,15 @@
 #include "config_server.h"
 
+// Helper to get MAC address as clean string (lowercase, no separators)
+static String getMACClean() {
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    char macStr[13];
+    snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(macStr);
+}
+
 ConfigServer::ConfigServer(ConfigManager& configManager)
     : config_(configManager), server_(80), running_(false), apMode_(false) {
 }
@@ -145,6 +155,10 @@ void ConfigServer::handleNotFound() {
 }
 
 String ConfigServer::generateConfigPage() {
+    // Get device info
+    String macAddress = getMACClean();
+    String ipAddress = apMode_ ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+
     String html = R"(
 <!DOCTYPE html>
 <html>
@@ -162,11 +176,24 @@ String ConfigServer::generateConfigPage() {
         .danger { background: #dc3545; }
         .danger:hover { background: #c82333; }
         .info { background: #f8f9fa; border: 1px solid #ddd; padding: 15px; border-radius: 4px; margin-top: 20px; }
+        .device-info { background: #e7f3ff; border: 1px solid #b3d7ff; padding: 15px; border-radius: 4px; margin-bottom: 20px; }
         .current { color: #666; font-size: 0.9em; }
+        code { background: #e9ecef; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
     </style>
 </head>
 <body>
     <h1>E-Ink Display Setup</h1>
+
+    <div class="device-info">
+        <strong>Device Info</strong><br>
+        <strong>MAC Address:</strong> <code>)";
+    html += macAddress;
+    html += R"(</code><br>
+        <strong>IP Address:</strong> <code>)";
+    html += ipAddress;
+    html += R"(</code><br>
+        <span class="current">Use the MAC address as the folder name on your image server for device-specific images.</span>
+    </div>
 
     <form action="/save" method="POST">
         <div class="form-group">
