@@ -155,7 +155,7 @@ cp your_photo.jpg images/default/
 
 Images will be automatically resized and converted to the display's 6-color palette. You can add multiple images and they'll rotate on each refresh.
 
-For device-specific images, see the "Multiple Boards with Different Images" section below.
+For device-specific images, see the "Support for multiple boards with different image collections" section below.
 
 ### Step 11: Start the Image Server
 
@@ -291,33 +291,7 @@ If the device can't connect to your WiFi in config mode:
 
 ---
 
-## Changing the Displayed Image
-
-### Quick Method
-
-Simply replace the `image.jpg` file and wait for the next refresh cycle (default: 15 minutes).
-
-### Immediate Update
-
-1. Replace `image.jpg` with your new image
-2. Press the reset button on the board
-3. The display will detect the new image and update
-
-### Supported Image Formats
-
-- JPEG (.jpg, .jpeg)
-- PNG (.png)
-- HEIC (.heic) - iPhone photos work directly
-- GIF, BMP, WebP
-
-The image will be automatically:
-- Resized to fit the display (1200x1600 pixels, portrait)
-- Converted to the 6-color palette with dithering
-- Rotated if necessary for correct orientation
-
----
-
-## Multiple Boards with Different Images
+## Support for multiple boards with different image collections
 
 You can run multiple EE02 boards from a single image server, each displaying different content. Each board is identified by its MAC address.
 
