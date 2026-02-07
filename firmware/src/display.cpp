@@ -129,9 +129,9 @@ void Spectra6Display::sleep() {
 void Spectra6Display::hardwareReset() {
     Serial.println("Spectra6: Hardware reset");
     digitalWrite(PIN_RESET, LOW);
-    delay(10);
+    delay(20);
     digitalWrite(PIN_RESET, HIGH);
-    delay(10);
+    delay(20);
     waitUntilIdle(2000);
 }
 

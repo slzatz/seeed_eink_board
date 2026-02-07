@@ -226,6 +226,7 @@ Boot count: 1
 NORMAL OPERATION MODE
 ========================================
 
+Battery: ADC=2413, voltage=4.21V
 Connecting to WiFi: YourNetwork
 .
 Connected! IP: 192....
@@ -407,15 +408,34 @@ seeed_eink_board/
 └─────────────────┘         └─────────────────┘
 
 1. ESP32 wakes from deep sleep
-2. Connects to WiFi
-3. Requests /hash from server (small request to check if image changed)
-4. If hash matches previous: go back to sleep (saves battery!)
-5. If hash is different: download /image_packed (960KB)
-6. Send data to e-ink display
-7. Display refreshes
-8. ESP32 enters deep sleep for configured interval
-9. Repeat from step 1
+2. Reads battery voltage via on-board ADC
+3. Connects to WiFi
+4. Requests /hash from server (small request to check if image changed)
+   - Sends X-Device-MAC and X-Battery-Voltage headers
+5. If hash matches previous: go back to sleep (saves battery!)
+6. If hash is different: download /image_packed (960KB)
+7. Send data to e-ink display
+8. Display refreshes
+9. ESP32 enters deep sleep for configured interval
+10. Repeat from step 1
 ```
+---
+
+## Battery Monitoring
+
+The firmware reads battery voltage on each wake cycle and sends it to the image server via the `X-Battery-Voltage` HTTP header. The server logs voltage levels and displays them on the status page at `http://your-server:5000/`.
+
+### Voltage Levels
+
+| Voltage | Capacity | Status |
+|---------|----------|--------|
+| 4.2V+   | Full (or on USB) | GOOD |
+| 3.7V    | ~50% | GOOD |
+| 3.3V    | ~10% | LOW |
+| 3.0V    | Empty (cutoff) | LOW |
+
+Battery status is visible on the server index page and in the `/current` JSON endpoint.
+
 ---
 
 ## Credits

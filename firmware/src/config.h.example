@@ -30,8 +30,12 @@
 
 // Button Pin Configuration (active LOW - directly connected to GND when pressed)
 #define PIN_BUTTON_1    2     // Config mode: hold during boot to enter setup
-#define PIN_BUTTON_2    1     // Available for future use
 #define PIN_BUTTON_3    3     // Available for future use
+
+// Battery ADC Configuration (EE02 board has voltage divider on GPIO1)
+#define PIN_BATTERY_ADC   1   // A0/GPIO1 - Battery voltage via voltage divider
+#define PIN_ADC_ENABLE    6   // A5/GPIO6 - Enable the voltage divider circuit
+#define BATTERY_SCALE     7.16  // Voltage divider scaling factor (from EE04 reference)
 
 // Display Dimensions
 #define DISPLAY_WIDTH   1600

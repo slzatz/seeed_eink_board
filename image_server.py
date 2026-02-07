@@ -24,6 +24,7 @@ import random
 import os
 import hashlib
 import json
+from datetime import datetime
 
 # Try to import PIL for image processing
 try:
@@ -259,6 +260,25 @@ class ImageRotator:
 # Initialize the image rotator
 _rotator = ImageRotator(IMAGES_DIR, STATE_FILE)
 
+# Battery voltage tracking per device: {device_id: {voltage, timestamp}}
+_battery_status = {}
+
+
+def log_battery_status(device_id: str):
+    """Extract battery voltage from request header and log it."""
+    voltage_str = request.headers.get('X-Battery-Voltage')
+    if voltage_str:
+        try:
+            voltage = float(voltage_str)
+            _battery_status[device_id] = {
+                'voltage': voltage,
+                'timestamp': datetime.now().isoformat(timespec='seconds')
+            }
+            level = "LOW" if voltage < 3.3 else "OK" if voltage < 3.7 else "GOOD"
+            print(f"Battery [{device_id}]: {voltage:.2f}V ({level})")
+        except ValueError:
+            pass
+
 
 def create_palette_image():
     """Create a palette image for PIL quantization."""
@@ -485,6 +505,7 @@ def image_hash():
     # Get device ID from header
     device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
+    log_battery_status(device_id)
     print(f"Hash request from device: {device_id}")
 
     image_path = get_current_image_path(device_id)
@@ -519,6 +540,7 @@ def image_packed():
     # Get device ID from header
     device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
+    log_battery_status(device_id)
     print(f"Image request from device: {device_id}")
 
     # Get next image (advances rotation)
@@ -596,6 +618,7 @@ def current():
             'current_image': os.path.basename(current_path) if current_path else None,
             'current_path': current_path,
             'rotation': status,
+            'battery': _battery_status.get(device_id),
             'heic_support': HEIC_SUPPORT,
             'images_dir': IMAGES_DIR,
             'fallback_image': DEFAULT_IMAGE_PATH if os.path.exists(DEFAULT_IMAGE_PATH) else None
@@ -610,7 +633,8 @@ def current():
             devices_status[dev_id] = {
                 'current_image': os.path.basename(current_path) if current_path else None,
                 'current_path': current_path,
-                'rotation': status
+                'rotation': status,
+                'battery': _battery_status.get(dev_id)
             }
 
         return jsonify({
@@ -633,16 +657,24 @@ def index():
         status = _rotator.get_status(dev_id)
         current_path = get_current_image_path(dev_id)
         current_name = os.path.basename(current_path) if current_path else "None"
+        batt = _battery_status.get(dev_id)
+        if batt:
+            v = batt['voltage']
+            color = '#c00' if v < 3.3 else '#c90' if v < 3.7 else '#090'
+            batt_display = f'<span style="color:{color};font-weight:bold">{v:.2f}V</span><br><small>{batt["timestamp"]}</small>'
+        else:
+            batt_display = '<span style="color:#999">N/A</span>'
         device_rows += f"""
         <tr>
             <td><code>{dev_id}</code></td>
             <td><code>{current_name}</code></td>
             <td>{status['total_images']}</td>
+            <td>{batt_display}</td>
             <td><code>{status['images_dir']}</code></td>
         </tr>"""
 
     if not device_rows:
-        device_rows = "<tr><td colspan='4'>No devices have connected yet</td></tr>"
+        device_rows = "<tr><td colspan='5'>No devices have connected yet</td></tr>"
 
     return f"""
     <h1>E-Ink Image Server (Multi-Device)</h1>
@@ -662,6 +694,7 @@ def index():
             <th>Device ID (MAC)</th>
             <th>Current Image</th>
             <th>Total Images</th>
+            <th>Battery</th>
             <th>Images Directory</th>
         </tr>
         {device_rows}

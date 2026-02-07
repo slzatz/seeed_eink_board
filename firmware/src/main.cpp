@@ -18,6 +18,9 @@ RTC_DATA_ATTR int bootCount = 0;
 // Used to skip download if image hasn't changed
 RTC_DATA_ATTR char lastImageHash[17] = {0};  // 16 chars + null terminator
 
+// Battery voltage (read once per boot, sent to server with requests)
+float batteryVoltage = -1.0;
+
 // Configuration mode: hold Button 1 during boot for 1 second
 #define CONFIG_BUTTON_HOLD_MS 1000
 
@@ -32,6 +35,40 @@ String getMACAddressClean() {
     snprintf(macStr, sizeof(macStr), "%02x%02x%02x%02x%02x%02x",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(macStr);
+}
+
+/**
+ * Read battery voltage via the on-board voltage divider.
+ * GPIO6 enables the divider circuit, GPIO1 reads the divided voltage.
+ * Returns voltage in volts (e.g., 3.85), or -1.0 if reading seems invalid.
+ */
+float readBatteryVoltage() {
+    pinMode(PIN_ADC_ENABLE, OUTPUT);
+    digitalWrite(PIN_ADC_ENABLE, HIGH);
+    delay(10);  // Let the ADC circuit stabilize
+
+    analogReadResolution(12);
+
+    // Average 16 samples to filter noise
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i++) {
+        sum += analogRead(PIN_BATTERY_ADC);
+    }
+    float avgAdc = sum / 16.0;
+
+    // Disable the voltage divider to save power
+    digitalWrite(PIN_ADC_ENABLE, LOW);
+
+    float voltage = (avgAdc / 4096.0) * BATTERY_SCALE;
+
+    // Sanity check: LiPo range is roughly 2.5V-4.3V
+    if (voltage < 0.5 || voltage > 5.0) {
+        Serial.printf("Battery: ADC=%.0f, voltage=%.2fV (out of range)\n", avgAdc, voltage);
+        return -1.0;
+    }
+
+    Serial.printf("Battery: ADC=%.0f, voltage=%.2fV\n", avgAdc, voltage);
+    return voltage;
 }
 
 void printWakeupReason() {
@@ -125,6 +162,11 @@ bool checkImageChanged() {
     http.addHeader("X-Device-MAC", macAddress);
     Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
 
+    // Add battery voltage header
+    if (batteryVoltage > 0) {
+        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
+    }
+
     int httpCode = http.GET();
 
     if (httpCode != HTTP_CODE_OK) {
@@ -174,8 +216,11 @@ bool fetchAndDisplayImage() {
     http.begin(url);
     http.setTimeout(HTTP_TIMEOUT_MS);
 
-    // Add device identification header
+    // Add device identification and battery headers
     http.addHeader("X-Device-MAC", getMACAddressClean());
+    if (batteryVoltage > 0) {
+        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
+    }
 
     int httpCode = http.GET();
 
@@ -288,6 +333,9 @@ void runNormalMode() {
     Serial.println("\n========================================");
     Serial.println("NORMAL OPERATION MODE");
     Serial.println("========================================\n");
+
+    // Read battery voltage before WiFi (ADC can be noisy during WiFi)
+    batteryVoltage = readBatteryVoltage();
 
     // Connect to WiFi first (needed for hash check)
     if (!connectWiFi()) {
