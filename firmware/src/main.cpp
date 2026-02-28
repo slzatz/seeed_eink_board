@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <sys/time.h>
+#include <time.h>
 #include "config.h"
 #include "display.h"
 #include "config_manager.h"
@@ -17,12 +20,20 @@ RTC_DATA_ATTR int bootCount = 0;
 // Last image hash stored in RTC memory (survives deep sleep)
 // Used to skip download if image hasn't changed
 RTC_DATA_ATTR char lastImageHash[17] = {0};  // 16 chars + null terminator
+char pendingImageHash[17] = {0};
 
 // Battery voltage (read once per boot, sent to server with requests)
 float batteryVoltage = -1.0;
 
 // Configuration mode: hold Button 1 during boot for 1 second
 #define CONFIG_BUTTON_HOLD_MS 1000
+#define DEVICE_CONFIG_ENDPOINT "/device_config"
+#define MIN_SLEEP_SECONDS 60
+#define VALID_UNIX_TIME 1704067200LL  // 2024-01-01 00:00:00 UTC
+
+String getBaseURL() {
+    return "http://" + configManager.getServerHost() + ":" + String(configManager.getServerPort());
+}
 
 /**
  * Get the WiFi MAC address as a clean string (lowercase, no separators).
@@ -69,6 +80,222 @@ float readBatteryVoltage() {
 
     Serial.printf("Battery: ADC=%.0f, voltage=%.2fV\n", avgAdc, voltage);
     return voltage;
+}
+
+void addCommonHeaders(HTTPClient& http) {
+    String macAddress = getMACAddressClean();
+    http.addHeader("X-Device-MAC", macAddress);
+    Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
+
+    if (batteryVoltage > 0) {
+        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
+    }
+}
+
+bool isClockValid(time_t now = time(nullptr)) {
+    return now >= VALID_UNIX_TIME;
+}
+
+void setClockFromEpoch(time_t epochSeconds) {
+    struct timeval tv;
+    tv.tv_sec = epochSeconds;
+    tv.tv_usec = 0;
+    settimeofday(&tv, nullptr);
+}
+
+int32_t getLocalSecondsOfDay(time_t utcNow, int16_t timezoneOffsetMinutes) {
+    int64_t localSeconds = static_cast<int64_t>(utcNow) + static_cast<int64_t>(timezoneOffsetMinutes) * 60LL;
+    int32_t secondsOfDay = static_cast<int32_t>(localSeconds % 86400LL);
+    if (secondsOfDay < 0) {
+        secondsOfDay += 86400;
+    }
+    return secondsOfDay;
+}
+
+bool isWithinActiveWindow(time_t utcNow, uint8_t startHour, uint8_t endHour, int16_t timezoneOffsetMinutes) {
+    if (startHour == endHour) {
+        return true;  // Same start/end means always active.
+    }
+
+    int32_t secondsOfDay = getLocalSecondsOfDay(utcNow, timezoneOffsetMinutes);
+    int32_t startSeconds = static_cast<int32_t>(startHour) * 3600;
+    int32_t endSeconds = static_cast<int32_t>(endHour) * 3600;
+
+    if (startHour < endHour) {
+        return secondsOfDay >= startSeconds && secondsOfDay < endSeconds;
+    }
+
+    return secondsOfDay >= startSeconds || secondsOfDay < endSeconds;
+}
+
+uint32_t secondsUntilNextActiveWindow(time_t utcNow, uint8_t startHour, int16_t timezoneOffsetMinutes) {
+    int32_t secondsOfDay = getLocalSecondsOfDay(utcNow, timezoneOffsetMinutes);
+    int32_t startSeconds = static_cast<int32_t>(startHour) * 3600;
+
+    if (secondsOfDay < startSeconds) {
+        return static_cast<uint32_t>(startSeconds - secondsOfDay);
+    }
+
+    return static_cast<uint32_t>((86400 - secondsOfDay) + startSeconds);
+}
+
+uint32_t secondsUntilWindowEnd(time_t utcNow, uint8_t startHour, uint8_t endHour, int16_t timezoneOffsetMinutes) {
+    if (startHour == endHour) {
+        return UINT32_MAX;
+    }
+
+    int32_t secondsOfDay = getLocalSecondsOfDay(utcNow, timezoneOffsetMinutes);
+    int32_t startSeconds = static_cast<int32_t>(startHour) * 3600;
+    int32_t endSeconds = static_cast<int32_t>(endHour) * 3600;
+
+    if (startHour < endHour) {
+        return static_cast<uint32_t>(endSeconds - secondsOfDay);
+    }
+
+    if (secondsOfDay >= startSeconds) {
+        return static_cast<uint32_t>((86400 - secondsOfDay) + endSeconds);
+    }
+
+    return static_cast<uint32_t>(endSeconds - secondsOfDay);
+}
+
+void printClockStatus() {
+    time_t now = time(nullptr);
+    if (!isClockValid(now)) {
+        Serial.println("Clock status: invalid (no recent server time sync yet)");
+        return;
+    }
+
+    int32_t localSeconds = getLocalSecondsOfDay(now, configManager.getTimezoneOffsetMinutes());
+    int localHour = localSeconds / 3600;
+    int localMinute = (localSeconds % 3600) / 60;
+    bool isActive = isWithinActiveWindow(now,
+                                         configManager.getActiveStartHour(),
+                                         configManager.getActiveEndHour(),
+                                         configManager.getTimezoneOffsetMinutes());
+
+    Serial.printf("Clock status: utc=%lld, local=%02d:%02d, active_window=%s\n",
+                  static_cast<long long>(now), localHour, localMinute,
+                  isActive ? "yes" : "no");
+}
+
+uint32_t calculateSleepSeconds() {
+    uint32_t refreshSeconds = static_cast<uint32_t>(configManager.getSleepMinutes()) * 60U;
+    time_t now = time(nullptr);
+
+    if (!isClockValid(now)) {
+        Serial.println("Clock invalid - using fixed refresh interval for sleep");
+        return max(refreshSeconds, static_cast<uint32_t>(MIN_SLEEP_SECONDS));
+    }
+
+    uint8_t activeStart = configManager.getActiveStartHour();
+    uint8_t activeEnd = configManager.getActiveEndHour();
+    int16_t timezoneOffset = configManager.getTimezoneOffsetMinutes();
+
+    if (!isWithinActiveWindow(now, activeStart, activeEnd, timezoneOffset)) {
+        uint32_t untilNextWindow = secondsUntilNextActiveWindow(now, activeStart, timezoneOffset);
+        Serial.printf("Outside active window - sleeping until next active start in %lu seconds\n", untilNextWindow);
+        return max(untilNextWindow, static_cast<uint32_t>(MIN_SLEEP_SECONDS));
+    }
+
+    uint32_t untilWindowEnd = secondsUntilWindowEnd(now, activeStart, activeEnd, timezoneOffset);
+    if (refreshSeconds < untilWindowEnd) {
+        return max(refreshSeconds, static_cast<uint32_t>(MIN_SLEEP_SECONDS));
+    }
+
+    uint32_t untilNextWindow = secondsUntilNextActiveWindow(now, activeStart, timezoneOffset);
+    Serial.printf("Next refresh would land in quiet hours - sleeping %lu seconds instead\n", untilNextWindow);
+    return max(untilNextWindow, static_cast<uint32_t>(MIN_SLEEP_SECONDS));
+}
+
+bool syncRemoteConfigAndTime() {
+    String configUrl = getBaseURL() + DEVICE_CONFIG_ENDPOINT;
+    Serial.printf("Fetching device config from: %s\n", configUrl.c_str());
+
+    HTTPClient http;
+    http.begin(configUrl);
+    http.setTimeout(HTTP_TIMEOUT_MS);
+    addCommonHeaders(http);
+
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK) {
+        Serial.printf("Device config fetch failed, HTTP code: %d\n", httpCode);
+        http.end();
+        return false;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    if (error) {
+        Serial.printf("Failed to parse device config JSON: %s\n", error.c_str());
+        return false;
+    }
+
+    if (!doc.containsKey("server_time_epoch")) {
+        Serial.println("Device config missing server_time_epoch");
+        return false;
+    }
+
+    time_t serverEpoch = static_cast<time_t>(doc["server_time_epoch"].as<int64_t>());
+    setClockFromEpoch(serverEpoch);
+    Serial.printf("Clock synchronized from server epoch: %lld\n", static_cast<long long>(serverEpoch));
+
+    uint16_t refreshMinutes = configManager.getSleepMinutes();
+    uint8_t activeStart = configManager.getActiveStartHour();
+    uint8_t activeEnd = configManager.getActiveEndHour();
+    int16_t timezoneOffset = configManager.getTimezoneOffsetMinutes();
+    bool scheduleChanged = false;
+
+    if (doc.containsKey("refresh_interval_minutes")) {
+        int value = doc["refresh_interval_minutes"].as<int>();
+        if (value > 0 && value <= 1440 && value != refreshMinutes) {
+            refreshMinutes = static_cast<uint16_t>(value);
+            scheduleChanged = true;
+        }
+    }
+
+    if (doc.containsKey("active_start_hour")) {
+        int value = doc["active_start_hour"].as<int>();
+        if (value >= 0 && value <= 23 && value != activeStart) {
+            activeStart = static_cast<uint8_t>(value);
+            scheduleChanged = true;
+        }
+    }
+
+    if (doc.containsKey("active_end_hour")) {
+        int value = doc["active_end_hour"].as<int>();
+        if (value >= 0 && value <= 23 && value != activeEnd) {
+            activeEnd = static_cast<uint8_t>(value);
+            scheduleChanged = true;
+        }
+    }
+
+    if (doc.containsKey("timezone_offset_minutes")) {
+        int value = doc["timezone_offset_minutes"].as<int>();
+        if (value >= -720 && value <= 840 && value != timezoneOffset) {
+            timezoneOffset = static_cast<int16_t>(value);
+            scheduleChanged = true;
+        }
+    }
+
+    if (scheduleChanged) {
+        configManager.setConfig(configManager.getServerHost(),
+                                configManager.getServerPort(),
+                                configManager.getImageEndpoint(),
+                                refreshMinutes,
+                                activeStart,
+                                activeEnd,
+                                timezoneOffset);
+        Serial.println("Applied schedule overrides from server");
+        configManager.printConfig();
+    }
+
+    const char* configSource = doc["config_source"] | "none";
+    Serial.printf("Remote config source: %s\n", configSource);
+    return true;
 }
 
 void printWakeupReason() {
@@ -147,8 +374,7 @@ void disconnectWiFi() {
  */
 bool checkImageChanged() {
     // Build hash endpoint URL from config
-    String hashUrl = "http://" + configManager.getServerHost() + ":" +
-                     String(configManager.getServerPort()) + "/hash";
+    String hashUrl = getBaseURL() + "/hash";
 
     Serial.printf("Checking image hash at: %s\n", hashUrl.c_str());
     Serial.printf("Last known hash: %s\n", lastImageHash[0] ? lastImageHash : "(none)");
@@ -156,16 +382,7 @@ bool checkImageChanged() {
     HTTPClient http;
     http.begin(hashUrl);
     http.setTimeout(HTTP_TIMEOUT_MS);
-
-    // Add device identification header
-    String macAddress = getMACAddressClean();
-    http.addHeader("X-Device-MAC", macAddress);
-    Serial.printf("Sending X-Device-MAC: %s\n", macAddress.c_str());
-
-    // Add battery voltage header
-    if (batteryVoltage > 0) {
-        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
-    }
+    addCommonHeaders(http);
 
     int httpCode = http.GET();
 
@@ -189,13 +406,13 @@ bool checkImageChanged() {
     // Compare with stored hash
     if (strcmp(newHash.c_str(), lastImageHash) == 0) {
         Serial.println("Image unchanged - skipping download");
+        pendingImageHash[0] = '\0';
         return false;  // No change
     }
 
-    // Image changed - update stored hash
     Serial.println("Image changed - will download new image");
-    strncpy(lastImageHash, newHash.c_str(), 16);
-    lastImageHash[16] = '\0';  // Ensure null termination
+    strncpy(pendingImageHash, newHash.c_str(), 16);
+    pendingImageHash[16] = '\0';
 
     return true;  // Changed
 }
@@ -214,13 +431,8 @@ bool fetchAndDisplayImage() {
 
     HTTPClient http;
     http.begin(url);
-    http.setTimeout(HTTP_TIMEOUT_MS);
-
-    // Add device identification and battery headers
-    http.addHeader("X-Device-MAC", getMACAddressClean());
-    if (batteryVoltage > 0) {
-        http.addHeader("X-Battery-Voltage", String(batteryVoltage, 2));
-    }
+    http.setTimeout(IMAGE_HTTP_TIMEOUT_MS);
+    addCommonHeaders(http);
 
     int httpCode = http.GET();
 
@@ -229,6 +441,16 @@ bool fetchAndDisplayImage() {
         free(imageBuffer);
         http.end();
         return false;
+    }
+
+    String responseImageHash = http.header("X-Image-Hash");
+    String responseImageName = http.header("X-Image-Name");
+    String responseDeviceId = http.header("X-Device-ID");
+    if (responseImageName.length() > 0 || responseImageHash.length() > 0 || responseDeviceId.length() > 0) {
+        Serial.printf("Response headers: X-Image-Name=%s, X-Image-Hash=%s, X-Device-ID=%s\n",
+                      responseImageName.length() > 0 ? responseImageName.c_str() : "(none)",
+                      responseImageHash.length() > 0 ? responseImageHash.c_str() : "(none)",
+                      responseDeviceId.length() > 0 ? responseDeviceId.c_str() : "(none)");
     }
 
     int contentLength = http.getSize();
@@ -245,6 +467,7 @@ bool fetchAndDisplayImage() {
     WiFiClient* stream = http.getStreamPtr();
     size_t bytesRead = 0;
     uint32_t startTime = millis();
+    uint32_t lastDataTime = startTime;
 
     while (bytesRead < contentLength && http.connected()) {
         size_t available = stream->available();
@@ -252,6 +475,7 @@ bool fetchAndDisplayImage() {
             size_t toRead = min(available, (size_t)(contentLength - bytesRead));
             size_t read = stream->readBytes(imageBuffer + bytesRead, toRead);
             bytesRead += read;
+            lastDataTime = millis();
 
             // Progress update every 100KB
             if ((bytesRead % 102400) == 0) {
@@ -260,9 +484,9 @@ bool fetchAndDisplayImage() {
         }
         yield();
 
-        // Timeout check
-        if (millis() - startTime > HTTP_TIMEOUT_MS) {
-            Serial.println("Download timeout!");
+        // Treat the timeout as "no data received recently", not total transfer duration.
+        if (millis() - lastDataTime > IMAGE_HTTP_TIMEOUT_MS) {
+            Serial.println("Download stalled - inactivity timeout");
             break;
         }
     }
@@ -286,15 +510,32 @@ bool fetchAndDisplayImage() {
     // Refresh the display
     display.refresh();
 
+    if (responseImageHash.length() == 16) {
+        strncpy(lastImageHash, responseImageHash.c_str(), 16);
+        lastImageHash[16] = '\0';
+    } else if (pendingImageHash[0] != '\0') {
+        strncpy(lastImageHash, pendingImageHash, 16);
+        lastImageHash[16] = '\0';
+    }
+
+    if (pendingImageHash[0] != '\0' && responseImageHash.length() == 16 &&
+        strcmp(pendingImageHash, responseImageHash.c_str()) != 0) {
+        Serial.printf("Warning: pending hash %s did not match response hash %s\n",
+                      pendingImageHash, responseImageHash.c_str());
+    }
+    pendingImageHash[0] = '\0';
+    Serial.printf("Committed displayed image hash: %s\n", lastImageHash[0] ? lastImageHash : "(none)");
+
     return true;
 }
 
-void enterDeepSleep() {
-    uint16_t sleepMinutes = configManager.getSleepMinutes();
-    Serial.printf("Entering deep sleep for %d minutes...\n", sleepMinutes);
+void enterDeepSleep(uint32_t sleepSeconds) {
+    uint32_t sleepMinutes = sleepSeconds / 60;
+    uint32_t remainderSeconds = sleepSeconds % 60;
+    Serial.printf("Entering deep sleep for %lu minutes %lu seconds...\n", sleepMinutes, remainderSeconds);
 
     // Configure timer wakeup
-    uint64_t sleepTime = (uint64_t)sleepMinutes * 60 * 1000000ULL;
+    uint64_t sleepTime = static_cast<uint64_t>(sleepSeconds) * 1000000ULL;
     esp_sleep_enable_timer_wakeup(sleepTime);
 
     // Turn off display power to save energy
@@ -342,14 +583,27 @@ void runNormalMode() {
         Serial.println("WiFi connection failed!");
         // Keep previous image, just go to sleep
         disconnectWiFi();
-        enterDeepSleep();
+        enterDeepSleep(calculateSleepSeconds());
+    }
+
+    syncRemoteConfigAndTime();
+    printClockStatus();
+
+    if (isClockValid() &&
+        !isWithinActiveWindow(time(nullptr),
+                              configManager.getActiveStartHour(),
+                              configManager.getActiveEndHour(),
+                              configManager.getTimezoneOffsetMinutes())) {
+        Serial.println("Currently in quiet hours - skipping hash/image fetch");
+        disconnectWiFi();
+        enterDeepSleep(calculateSleepSeconds());
     }
 
     // Check if image has changed before downloading
     if (!checkImageChanged()) {
         Serial.println("Image unchanged - going back to sleep");
         disconnectWiFi();
-        enterDeepSleep();
+        enterDeepSleep(calculateSleepSeconds());
     }
 
     // Image has changed - initialize display and update
@@ -370,7 +624,7 @@ void runNormalMode() {
     disconnectWiFi();
 
     // Enter deep sleep
-    enterDeepSleep();
+    enterDeepSleep(calculateSleepSeconds());
 }
 
 void setup() {

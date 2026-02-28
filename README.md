@@ -12,21 +12,30 @@ Replaces the Seeed factoryi-installed firmware on the EE02 board with custom fir
 2. Fetches images from a simple server that you can run locally or on a remote server
 3. Displays the image on a spectra 6 eink screen
 4. Goes to sleep to conserve battery (can vary sleep interval)
-5. Wakes up periodically to check for new images and only refreshes the image if it has changed
+5. Can skip wakeups during configurable quiet hours
+6. Wakes up periodically to check for new images and only refreshes the image if it has changed
 
 ---
 
 ## What's required
 
-- Python 3.10+ (probably already installed)
-- uv 
-- PlatformIO (installed automatically)
+- Python 3.10 or newer
+- `uv`
+- A Seeed EE02 / XIAO ePaper board with a 13.3" Spectra 6 panel
+- A USB-C data cable
+- A 2.4 GHz WiFi network
 
 ---
 
 ## Step-by-Step Setup Guide
 
-### Step 1: Install uv (Python Package Manager)
+### Step 1: Install `uv`
+
+If you do not already have `uv`, install it with:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ### Step 2: Download This Project
 
@@ -69,24 +78,41 @@ Edit `config.h` and change these lines to match your WiFi network:
 
 ### Step 5: Find Your Computer's IP Address
 
+The board needs the IP address of the computer that will run `image_server.py`.
+
+Linux:
+```bash
+hostname -I
+```
+
+macOS:
+```bash
+ipconfig getifaddr en0
+```
+
+You want the address on your local network, usually something like `192.168.x.x`.
+
 ### Step 6: Configure the Image Server Address
 
 Assuming at least for testing purposes you are running the image server from this repository.  Of course you can run it from wherever you like.
 
 Edit `firmware/src/config_manager.h`:
 
-Find this line and change the IP address to YOUR computer's IP:
+Find this line and change the IP address to your server's IP:
 
 ```cpp
-#define DEFAULT_SERVER_HOST "192.168.86.34"  // Change this to your IP!
+#define DEFAULT_SERVER_HOST "192.168.86.33"  // Change this to your IP
 ```
 
 The other settings should be fine:
 - `DEFAULT_SERVER_PORT 5000` - The server runs on port 5000
 - `DEFAULT_IMAGE_ENDPOINT "/image_packed"` - The URL path for images
-- `DEFAULT_SLEEP_MINUTES 15` - For testing purposes you can always reset the board to force an image refresh
+- `DEFAULT_SLEEP_MINUTES 15` - minutes between wakeups during active hours
+- `DEFAULT_ACTIVE_START_HOUR 8` - local hour when normal refreshes begin
+- `DEFAULT_ACTIVE_END_HOUR 20` - local hour when quiet hours begin
+- `DEFAULT_TIMEZONE_OFFSET_MINUTES 0` - minutes from UTC, for example `-300` for EST without DST
 
-Note that you will get the Flask "This is a development server" warning when running the server. Up to you if you want to set up a production server at some point.
+The device can also pull these schedule settings from the server later, so this default only has to be good enough to get you started.
 
 ### Step 7: Build the Firmware
 
@@ -153,9 +179,21 @@ mkdir -p images/default
 cp your_photo.jpg images/default/
 ```
 
-Images will be automatically resized and converted to the display's 6-color palette. You can add multiple images and they'll rotate on each refresh.
+Images will be automatically resized and converted to the display's 6-color palette. You can add multiple images and they will rotate on each refresh.
+
+JPEG and PNG are the safest choices. HEIC is supported if the required Python package is installed, but it can take longer for the server to process.
 
 For device-specific images, see the "Support for multiple boards with different image collections" section below.
+
+Optional: add a schedule override file so frames only wake during the hours you care about:
+
+```bash
+cp device_config.example.json images/default/device_config.json
+```
+
+The same file can also live in `images/<mac-address>/device_config.json` for a specific board.
+
+If you prefer not to edit JSON manually, open `http://YOUR_SERVER_IP:5000/` after starting the server. The main page now includes embedded schedule editors for the global fallback, the default device schedule, and any devices that have already connected. The focused editor remains available at `http://YOUR_SERVER_IP:5000/schedule`.
 
 ### Step 11: Start the Image Server
 
@@ -180,15 +218,25 @@ Device directories found: default, d0cf1326f7e8
 
 Leave this running and open a new terminal for the next steps.
 
+Open `http://YOUR_SERVER_IP:5000/` in a browser. That page shows:
+
+- connected devices
+- battery voltage reported by each device
+- the current image directory for each device
+- embedded schedule editors for global, default, and per-device overrides
+
 ### Step 12: Test the Display
 
 Press the **reset button** on the EE02 board.
 
 The display should:
 1. Connect to WiFi (a few seconds)
-2. Download the image (about 10 seconds)
-3. Refresh the display (20-30 seconds of flickering)
-4. Go to sleep
+2. Sync current time and any schedule overrides from the server
+3. Download the image if needed
+4. Refresh the display (usually 20-30 seconds of flickering)
+5. Go to sleep, potentially until the next active window
+
+Do not worry if the first image takes a while. The server may spend extra time resizing and converting a large image before it starts sending the 960 KB packed display buffer.
 
 **Congratulations! (if that actually worked)** Your e-ink display is now showing your image!
 
@@ -211,6 +259,26 @@ Press reset on the board to see output.
 ```bash
 cd firmware
 uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+```
+
+### Following logs across deep sleep
+
+The USB serial device disappears when the board enters deep sleep, so a single `pio device monitor` session usually stops after the first sleep cycle.
+
+This loop reattaches each time the board wakes up:
+
+```bash
+cd firmware
+while true; do
+  uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+  sleep 1
+done
+```
+
+To save that output to a file at the same time:
+
+```bash
+script -f /tmp/ee02-monitor.log -c 'bash -lc "cd /home/slzatz/seeed_eink_board/firmware; while true; do uv run pio device monitor --port /dev/ttyACM0 --baud 115200; sleep 1; done"'
 ```
 
 ### What You'll See
@@ -278,7 +346,9 @@ You can change the server address, sleep interval, and other settings without re
    - **Server Host:** The IP address of your image server
    - **Server Port:** Usually 5000
    - **Image Endpoint:** Usually `/image_packed`
-   - **Sleep Interval:** How often to check for new images (1-1440 minutes)
+   - **Refresh Interval:** How often to check for new images during active hours (1-1440 minutes)
+   - **Active Start / End Hour:** Local wall-clock active window
+   - **Timezone Offset:** Minutes from UTC for local scheduling
 5. Click **Save Configuration**
 6. Click **Reboot Device**
 
@@ -367,6 +437,13 @@ The device can't reach the image server:
 3. Make sure your firewall allows connections on port 5000
 4. Test from another device: `curl http://YOUR_SERVER_IP:5000/hash`
 
+### The server is reachable, but image updates feel slow
+
+- This display is inherently slow to refresh. A full refresh often takes 20-30 seconds.
+- The server may also need extra time to resize and quantize a source image before it can send `/image_packed`.
+- HEIC images are usually slower to process than JPEG or PNG.
+- Watch the server terminal and the firmware log together if you need to separate server processing time from panel refresh time.
+
 ### Image is rotated incorrectly
 
 The display is designed for portrait orientation with the board at the bottom. If your image appears rotated, you can edit `image_server.py` and change the rotation value (line with `img.rotate(270,`)
@@ -410,14 +487,16 @@ seeed_eink_board/
 1. ESP32 wakes from deep sleep
 2. Reads battery voltage via on-board ADC
 3. Connects to WiFi
-4. Requests /hash from server (small request to check if image changed)
+4. Requests `/device_config` from server to sync time and optional schedule overrides
+5. If local time is outside the active window: go back to deep sleep until the next start hour
+6. Requests `/hash` from server (small request to check if image changed)
    - Sends X-Device-MAC and X-Battery-Voltage headers
-5. If hash matches previous: go back to sleep (saves battery!)
-6. If hash is different: download /image_packed (960KB)
-7. Send data to e-ink display
-8. Display refreshes
-9. ESP32 enters deep sleep for configured interval
-10. Repeat from step 1
+7. If hash matches previous: go back to sleep (saves battery!)
+8. If hash is different: download `/image_packed` (960KB)
+9. Send data to e-ink display
+10. Display refreshes
+11. ESP32 enters deep sleep for the configured interval or until the next active window
+12. Repeat from step 1
 ```
 ---
 

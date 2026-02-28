@@ -16,7 +16,7 @@ Usage:
     # Server runs on http://0.0.0.0:5000
 """
 
-from flask import Flask, send_file, Response, jsonify, request
+from flask import Flask, send_file, Response, jsonify, request, redirect
 import requests
 import wand.image
 from io import BytesIO
@@ -25,6 +25,8 @@ import os
 import hashlib
 import json
 from datetime import datetime
+from html import escape
+from urllib.parse import quote_plus
 
 # Try to import PIL for image processing
 try:
@@ -88,8 +90,17 @@ DEFAULT_IMAGE_PATH = "image.jpg"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(SCRIPT_DIR, "images")
 STATE_FILE = os.path.join(SCRIPT_DIR, ".eink_rotation_state.json")
+DEVICE_CONFIG_FILENAME = "device_config.json"
+GLOBAL_DEVICE_CONFIG_PATH = os.path.join(SCRIPT_DIR, DEVICE_CONFIG_FILENAME)
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.heic', '.webp'}
 DEFAULT_DEVICE_ID = "default"
+GLOBAL_SCHEDULE_TARGET = "global"
+SCHEDULE_KEYS = (
+    'refresh_interval_minutes',
+    'active_start_hour',
+    'active_end_hour',
+    'timezone_offset_minutes',
+)
 
 # Image enhancement settings
 DEFAULT_CONTRAST = 1.2
@@ -108,6 +119,319 @@ _image_cache = {
 def normalize_mac(mac_str: str) -> str:
     """Convert MAC address to lowercase, no separators."""
     return mac_str.lower().replace(':', '').replace('-', '').replace(' ', '')
+
+
+def load_schedule_config(path: str) -> dict | None:
+    """Load and validate an optional schedule config JSON file."""
+    if not os.path.exists(path):
+        return None
+
+    try:
+        with open(path, 'r') as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Error loading device config {path}: {e}")
+        return None
+
+    if not isinstance(raw, dict):
+        print(f"Device config {path} must contain a JSON object")
+        return None
+
+    config = {}
+
+    if 'active_start_hour' in raw:
+        value = raw['active_start_hour']
+        if isinstance(value, int) and 0 <= value <= 23:
+            config['active_start_hour'] = value
+        else:
+            print(f"Ignoring invalid active_start_hour in {path}: {value}")
+
+    if 'active_end_hour' in raw:
+        value = raw['active_end_hour']
+        if isinstance(value, int) and 0 <= value <= 23:
+            config['active_end_hour'] = value
+        else:
+            print(f"Ignoring invalid active_end_hour in {path}: {value}")
+
+    if 'timezone_offset_minutes' in raw:
+        value = raw['timezone_offset_minutes']
+        if isinstance(value, int) and -720 <= value <= 840:
+            config['timezone_offset_minutes'] = value
+        else:
+            print(f"Ignoring invalid timezone_offset_minutes in {path}: {value}")
+
+    if 'refresh_interval_minutes' in raw:
+        value = raw['refresh_interval_minutes']
+        if isinstance(value, int) and 1 <= value <= 1440:
+            config['refresh_interval_minutes'] = value
+        else:
+            print(f"Ignoring invalid refresh_interval_minutes in {path}: {value}")
+
+    return config
+
+
+def get_device_schedule_config(device_id: str) -> tuple[dict, str]:
+    """Resolve schedule config using device-specific, default, then global fallback."""
+    candidate_paths = []
+
+    if device_id != DEFAULT_DEVICE_ID:
+        candidate_paths.append(
+            (os.path.join(IMAGES_DIR, device_id, DEVICE_CONFIG_FILENAME), f"images/{device_id}/{DEVICE_CONFIG_FILENAME}")
+        )
+
+    candidate_paths.append(
+        (os.path.join(IMAGES_DIR, DEFAULT_DEVICE_ID, DEVICE_CONFIG_FILENAME),
+         f"images/{DEFAULT_DEVICE_ID}/{DEVICE_CONFIG_FILENAME}")
+    )
+    candidate_paths.append((GLOBAL_DEVICE_CONFIG_PATH, DEVICE_CONFIG_FILENAME))
+
+    for path, label in candidate_paths:
+        config = load_schedule_config(path)
+        if config is not None:
+            return config, label
+
+    return {}, "none"
+
+
+def normalize_schedule_target(target: str | None) -> str:
+    """Normalize schedule target identifiers used by the editor UI."""
+    if not target:
+        return GLOBAL_SCHEDULE_TARGET
+
+    target = target.strip().lower()
+    if target in {GLOBAL_SCHEDULE_TARGET, DEFAULT_DEVICE_ID}:
+        return target
+
+    return normalize_mac(target)
+
+
+def get_schedule_config_path(target: str) -> str:
+    """Return the exact JSON path for a given schedule target."""
+    if target == GLOBAL_SCHEDULE_TARGET:
+        return GLOBAL_DEVICE_CONFIG_PATH
+
+    if target == DEFAULT_DEVICE_ID:
+        return os.path.join(IMAGES_DIR, DEFAULT_DEVICE_ID, DEVICE_CONFIG_FILENAME)
+
+    return os.path.join(IMAGES_DIR, target, DEVICE_CONFIG_FILENAME)
+
+
+def describe_schedule_target(target: str) -> str:
+    """Human-readable label for schedule targets."""
+    if target == GLOBAL_SCHEDULE_TARGET:
+        return "Global fallback"
+    if target == DEFAULT_DEVICE_ID:
+        return "Default device schedule"
+    return f"Device {target}"
+
+
+def get_schedule_editor_state(target: str) -> dict:
+    """Collect exact and effective schedule config state for the editor."""
+    target = normalize_schedule_target(target)
+    exact_path = get_schedule_config_path(target)
+    exact_config = load_schedule_config(exact_path) or {}
+
+    if target == GLOBAL_SCHEDULE_TARGET:
+        effective_config = exact_config
+        effective_source = DEVICE_CONFIG_FILENAME if exact_config else "none"
+    else:
+        effective_config, effective_source = get_device_schedule_config(target)
+
+    form_values = {}
+    for key in SCHEDULE_KEYS:
+        value = exact_config.get(key, effective_config.get(key, ''))
+        form_values[key] = value
+
+    return {
+        'target': target,
+        'label': describe_schedule_target(target),
+        'exact_path': exact_path,
+        'exact_config': exact_config,
+        'effective_config': effective_config,
+        'effective_source': effective_source,
+        'form_values': form_values,
+        'has_override': os.path.exists(exact_path),
+    }
+
+
+def save_schedule_config(path: str, config: dict) -> None:
+    """Persist a schedule override JSON file."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    with open(path, 'w') as f:
+        json.dump(config, f, indent=2)
+        f.write('\n')
+
+
+def delete_schedule_config(path: str) -> bool:
+    """Delete a schedule override file if it exists."""
+    if os.path.exists(path):
+        os.remove(path)
+        return True
+    return False
+
+
+def parse_schedule_form(form) -> tuple[dict | None, str | None]:
+    """Validate schedule editor form input."""
+    try:
+        refresh_interval = int(form.get('refresh_interval_minutes', ''))
+        active_start = int(form.get('active_start_hour', ''))
+        active_end = int(form.get('active_end_hour', ''))
+        timezone_offset = int(form.get('timezone_offset_minutes', ''))
+    except ValueError:
+        return None, "All schedule fields must be integers."
+
+    if not 1 <= refresh_interval <= 1440:
+        return None, "Refresh interval must be between 1 and 1440 minutes."
+    if not 0 <= active_start <= 23:
+        return None, "Active start hour must be between 0 and 23."
+    if not 0 <= active_end <= 23:
+        return None, "Active end hour must be between 0 and 23."
+    if not -720 <= timezone_offset <= 840:
+        return None, "Timezone offset must be between -720 and 840 minutes."
+
+    return {
+        'refresh_interval_minutes': refresh_interval,
+        'active_start_hour': active_start,
+        'active_end_hour': active_end,
+        'timezone_offset_minutes': timezone_offset,
+    }, None
+
+
+def get_schedule_targets() -> list[str]:
+    """Return editor shortcut targets."""
+    targets = {GLOBAL_SCHEDULE_TARGET, DEFAULT_DEVICE_ID}
+    targets.update(_rotator.get_all_devices())
+    targets.discard('')
+    return sorted(targets, key=lambda value: (value not in {GLOBAL_SCHEDULE_TARGET, DEFAULT_DEVICE_ID}, value))
+
+
+def render_schedule_form_card(target: str, include_target_picker: bool = False,
+                              redirect_to: str = "/schedule") -> str:
+    """Render a schedule override form card for a specific target."""
+    state = get_schedule_editor_state(target)
+    exact_json = escape(json.dumps(state['exact_config'], indent=2)) if state['exact_config'] else '{}'
+    effective_json = escape(json.dumps(state['effective_config'], indent=2)) if state['effective_config'] else '{}'
+    network_info_html = ""
+
+    if target not in {GLOBAL_SCHEDULE_TARGET, DEFAULT_DEVICE_ID}:
+        network_info = _device_network_status.get(target)
+        if network_info:
+            network_info_html = (
+                f'<p><strong>Last IP:</strong> <code>{escape(network_info["ip"])}</code><br>'
+                f'<span class="hint">Last seen: {escape(network_info["timestamp"])}</span></p>'
+            )
+        else:
+            network_info_html = '<p><strong>Last IP:</strong> <span class="hint">Not seen yet</span></p>'
+
+    target_picker_html = ""
+    if include_target_picker:
+        target_picker_html = f"""
+        <form action="/schedule" method="GET" style="margin-top: 12px;">
+          <div class="row">
+            <label for="target">Edit target</label>
+            <input id="target" type="text" name="target" value="{escape(state['target'])}" placeholder="global, default, or device MAC">
+            <div class="hint">Use <code>global</code>, <code>default</code>, or a MAC like <code>d0cf1326f7e8</code>.</div>
+          </div>
+          <button type="submit">Open Target</button>
+        </form>
+        """
+
+    return f"""
+      <div class="card">
+        <h2>{escape(state['label'])}</h2>
+        <p><strong>Override file:</strong> <code>{escape(state['exact_path'])}</code></p>
+        <p><strong>Effective source:</strong> <code>{escape(state['effective_source'])}</code></p>
+        {network_info_html}
+        {target_picker_html}
+        <form action="/schedule/save" method="POST">
+          <input type="hidden" name="target" value="{escape(state['target'])}">
+          <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
+          <div class="row">
+            <label>Refresh Interval (minutes)</label>
+            <input type="number" name="refresh_interval_minutes" min="1" max="1440" value="{escape(str(state['form_values']['refresh_interval_minutes']))}" required>
+          </div>
+          <div class="row">
+            <label>Active Start Hour</label>
+            <input type="number" name="active_start_hour" min="0" max="23" value="{escape(str(state['form_values']['active_start_hour']))}" required>
+          </div>
+          <div class="row">
+            <label>Active End Hour</label>
+            <input type="number" name="active_end_hour" min="0" max="23" value="{escape(str(state['form_values']['active_end_hour']))}" required>
+          </div>
+          <div class="row">
+            <label>Timezone Offset (minutes from UTC)</label>
+            <input type="number" name="timezone_offset_minutes" min="-720" max="840" value="{escape(str(state['form_values']['timezone_offset_minutes']))}" required>
+          </div>
+          <button type="submit">Save Override</button>
+        </form>
+        <form action="/schedule/clear" method="POST" style="margin-top:12px;">
+          <input type="hidden" name="target" value="{escape(state['target'])}">
+          <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
+          <button type="submit" class="danger">Clear Override</button>
+          <span class="hint">Deletes only the exact file for this target.</span>
+        </form>
+        <div style="margin-top:16px;">
+          <strong>Exact Override JSON</strong>
+          <pre>{exact_json}</pre>
+          <strong>Effective Schedule JSON</strong>
+          <pre>{effective_json}</pre>
+        </div>
+      </div>
+    """
+
+
+def render_schedule_editor(target: str, message: str = "", error: str = "") -> str:
+    """Render a simple HTML editor for schedule overrides."""
+    shortcuts = ''.join(
+        f'<li><a href="/schedule?target={escape(schedule_target)}">{escape(describe_schedule_target(schedule_target))}</a></li>'
+        for schedule_target in get_schedule_targets()
+    )
+    message_html = f'<div class="message success">{escape(message)}</div>' if message else ''
+    error_html = f'<div class="message error">{escape(error)}</div>' if error else ''
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>Schedule Editor</title>
+      <style>
+        body {{ font-family: Arial, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px 48px; background: #f6f7f9; color: #222; }}
+        h1, h2 {{ margin-bottom: 0.4rem; }}
+        .card {{ background: white; border: 1px solid #ddd; border-radius: 8px; padding: 18px; margin-bottom: 16px; }}
+        .row {{ margin-bottom: 14px; }}
+        label {{ display: block; font-weight: bold; margin-bottom: 6px; }}
+        input[type="text"], input[type="number"] {{ width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }}
+        button {{ background: #0b67d0; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; }}
+        button.danger {{ background: #c43d31; }}
+        .message {{ padding: 12px 14px; border-radius: 6px; margin-bottom: 16px; }}
+        .success {{ background: #e7f6ea; border: 1px solid #9bd0a7; }}
+        .error {{ background: #fdecec; border: 1px solid #e2a4a4; }}
+        code, pre {{ background: #eef1f4; border-radius: 4px; }}
+        code {{ padding: 2px 5px; }}
+        pre {{ padding: 12px; overflow-x: auto; }}
+        ul {{ margin-top: 8px; }}
+        .hint {{ color: #555; font-size: 0.95em; }}
+      </style>
+    </head>
+    <body>
+      <h1>Schedule Editor</h1>
+      <p><a href="/">Back to server status</a></p>
+      {message_html}
+      {error_html}
+
+      {render_schedule_form_card(target, include_target_picker=True)}
+
+      <div class="card">
+        <h2>Shortcuts</h2>
+        <ul>{shortcuts}</ul>
+      </div>
+    </body>
+    </html>
+    """
 
 
 class ImageRotator:
@@ -204,8 +528,8 @@ class ImageRotator:
         images.sort()
         return images
 
-    def get_next_image(self, device_id: str = DEFAULT_DEVICE_ID) -> str | None:
-        """Get path to next image in rotation for a specific device."""
+    def peek_next_image(self, device_id: str = DEFAULT_DEVICE_ID) -> str | None:
+        """Get path to the next image in rotation without advancing state."""
         images = self._scan_directory(device_id)
         if not images:
             return None
@@ -213,7 +537,19 @@ class ImageRotator:
         state = self._get_device_state(device_id)
         device_dir = self._get_device_dir(device_id)
 
-        # Handle case where image list changed (files added/removed)
+        if state['current_index'] >= len(images):
+            state['current_index'] = 0
+
+        image_name = images[state['current_index']]
+        return os.path.join(device_dir, image_name)
+
+    def mark_image_served(self, device_id: str = DEFAULT_DEVICE_ID) -> str | None:
+        """Advance rotation state after successfully serving the next image."""
+        images = self._scan_directory(device_id)
+        if not images:
+            return None
+
+        state = self._get_device_state(device_id)
         if state['current_index'] >= len(images):
             state['current_index'] = 0
 
@@ -222,7 +558,16 @@ class ImageRotator:
         state['current_index'] = (state['current_index'] + 1) % len(images)
         self._save_state()
 
-        return os.path.join(device_dir, image_name)
+        return image_name
+
+    def get_next_image(self, device_id: str = DEFAULT_DEVICE_ID) -> str | None:
+        """Get path to next image in rotation for a specific device and advance state."""
+        image_path = self.peek_next_image(device_id)
+        if not image_path:
+            return None
+
+        self.mark_image_served(device_id)
+        return image_path
 
     def get_current_image(self, device_id: str = DEFAULT_DEVICE_ID) -> str | None:
         """
@@ -263,9 +608,25 @@ _rotator = ImageRotator(IMAGES_DIR, STATE_FILE)
 # Battery voltage tracking per device: {device_id: {voltage, timestamp}}
 _battery_status = {}
 
+# Last-seen device network info: {device_id: {ip, timestamp}}
+_device_network_status = {}
+
+
+def record_device_request(device_id: str):
+    """Track the last IP address and timestamp seen for a device."""
+    if device_id == DEFAULT_DEVICE_ID:
+        return
+
+    _device_network_status[device_id] = {
+        'ip': request.remote_addr or 'unknown',
+        'timestamp': datetime.now().isoformat(timespec='seconds')
+    }
+
 
 def log_battery_status(device_id: str):
     """Extract battery voltage from request header and log it."""
+    record_device_request(device_id)
+
     voltage_str = request.headers.get('X-Battery-Voltage')
     if voltage_str:
         try:
@@ -452,6 +813,22 @@ def get_next_image_path(device_id: str = DEFAULT_DEVICE_ID) -> str | None:
     return None
 
 
+def get_pending_image_path(device_id: str = DEFAULT_DEVICE_ID) -> str | None:
+    """
+    Get the next image that would be served to a device without advancing rotation.
+
+    This is used so /hash and /image_packed describe the same image.
+    """
+    next_image = _rotator.peek_next_image(device_id)
+    if next_image and os.path.exists(next_image):
+        return next_image
+
+    if os.path.exists(DEFAULT_IMAGE_PATH):
+        return DEFAULT_IMAGE_PATH
+
+    return None
+
+
 def display_image(uri, w=None, h=None):
     """Fetch and process an image from a URL."""
     print(uri)
@@ -508,18 +885,84 @@ def image_hash():
     log_battery_status(device_id)
     print(f"Hash request from device: {device_id}")
 
-    image_path = get_current_image_path(device_id)
+    image_path = get_pending_image_path(device_id)
     if not image_path:
+        print(f"Hash request: no pending image for device {device_id}")
         return "No image", 404
 
     try:
         _, hash_value = get_cached_image_data(image_path)
         if hash_value is None:
             return "No image", 404
+        print(f"Hash response for {device_id}: next_image={os.path.basename(image_path)} hash={hash_value}")
         return hash_value
     except Exception as e:
         print(f"Error getting image hash: {e}")
         return f"Error: {e}", 500
+
+
+@app.route("/device_config")
+def device_config():
+    """
+    Return current server time plus optional per-device schedule overrides.
+
+    The firmware persists any provided values locally and uses its own RTC-backed
+    clock plus active window logic to decide how long to sleep.
+    """
+    device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
+    device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
+    log_battery_status(device_id)
+
+    schedule_config, config_source = get_device_schedule_config(device_id)
+
+    payload = {
+        'device_id': device_id,
+        'server_time_epoch': int(datetime.now().timestamp()),
+        'config_source': config_source,
+    }
+    payload.update(schedule_config)
+
+    return jsonify(payload)
+
+
+@app.route("/schedule")
+def schedule_editor():
+    """Small web UI for editing schedule overrides."""
+    target = normalize_schedule_target(request.args.get('target'))
+    message = request.args.get('message', '')
+    error = request.args.get('error', '')
+    return render_schedule_editor(target, message=message, error=error)
+
+
+@app.route("/schedule/save", methods=["POST"])
+def schedule_save():
+    """Save a schedule override JSON file."""
+    target = normalize_schedule_target(request.form.get('target'))
+    redirect_to = request.form.get('redirect_to', '/schedule') or '/schedule'
+    config, error = parse_schedule_form(request.form)
+    if error:
+        if redirect_to == '/':
+            return redirect(f"/?error={quote_plus(error)}")
+        return render_schedule_editor(target, error=error)
+
+    path = get_schedule_config_path(target)
+    save_schedule_config(path, config)
+    if redirect_to == '/':
+        return redirect(f"/?message={quote_plus('Schedule override saved')}")
+    return redirect(f"/schedule?target={target}&message={quote_plus('Schedule override saved')}")
+
+
+@app.route("/schedule/clear", methods=["POST"])
+def schedule_clear():
+    """Delete the exact schedule override file for a target."""
+    target = normalize_schedule_target(request.form.get('target'))
+    redirect_to = request.form.get('redirect_to', '/schedule') or '/schedule'
+    path = get_schedule_config_path(target)
+    deleted = delete_schedule_config(path)
+    message = "Schedule override cleared" if deleted else "No override file existed for this target"
+    if redirect_to == '/':
+        return redirect(f"/?message={quote_plus(message)}")
+    return redirect(f"/schedule?target={target}&message={quote_plus(message)}")
 
 
 @app.route("/image_packed")
@@ -543,8 +986,8 @@ def image_packed():
     log_battery_status(device_id)
     print(f"Image request from device: {device_id}")
 
-    # Get next image (advances rotation)
-    image_path = get_next_image_path(device_id)
+    # Resolve the next image without advancing so /hash and /image_packed stay in sync.
+    image_path = get_pending_image_path(device_id)
     if not image_path:
         return "No images available", 404
 
@@ -553,6 +996,13 @@ def image_packed():
         if packed_data is None:
             return "Failed to process image", 500
 
+        image_name = os.path.basename(image_path)
+        _rotator.mark_image_served(device_id)
+        print(
+            f"Image response for {device_id}: "
+            f"image={image_name} hash={image_hash} bytes={len(packed_data)}"
+        )
+
         return Response(
             packed_data,
             mimetype='application/octet-stream',
@@ -560,7 +1010,7 @@ def image_packed():
                 'Content-Length': str(len(packed_data)),
                 'Content-Disposition': 'attachment; filename=image.bin',
                 'X-Image-Hash': image_hash,
-                'X-Image-Name': os.path.basename(image_path),
+                'X-Image-Name': image_name,
                 'X-Device-ID': device_id
             }
         )
@@ -612,12 +1062,15 @@ def current():
         device_id = normalize_mac(device_mac)
         status = _rotator.get_status(device_id)
         current_path = get_current_image_path(device_id)
+        schedule_config, config_source = get_device_schedule_config(device_id)
 
         return jsonify({
             'device_id': device_id,
             'current_image': os.path.basename(current_path) if current_path else None,
             'current_path': current_path,
             'rotation': status,
+            'schedule_config': schedule_config,
+            'config_source': config_source,
             'battery': _battery_status.get(device_id),
             'heic_support': HEIC_SUPPORT,
             'images_dir': IMAGES_DIR,
@@ -630,10 +1083,13 @@ def current():
         for dev_id in all_devices:
             status = _rotator.get_status(dev_id)
             current_path = get_current_image_path(dev_id)
+            schedule_config, config_source = get_device_schedule_config(dev_id)
             devices_status[dev_id] = {
                 'current_image': os.path.basename(current_path) if current_path else None,
                 'current_path': current_path,
                 'rotation': status,
+                'schedule_config': schedule_config,
+                'config_source': config_source,
                 'battery': _battery_status.get(dev_id)
             }
 
@@ -650,6 +1106,16 @@ def current():
 def index():
     """Show available endpoints and multi-device status."""
     all_devices = _rotator.get_all_devices()
+    message = request.args.get('message', '')
+    error = request.args.get('error', '')
+    message_html = f'<div class="message success">{escape(message)}</div>' if message else ''
+    error_html = f'<div class="message error">{escape(error)}</div>' if error else ''
+    schedule_cards = [
+        render_schedule_form_card(GLOBAL_SCHEDULE_TARGET, redirect_to="/"),
+        render_schedule_form_card(DEFAULT_DEVICE_ID, redirect_to="/"),
+    ]
+    for dev_id in all_devices:
+        schedule_cards.append(render_schedule_form_card(dev_id, redirect_to="/"))
 
     # Build device status table
     device_rows = ""
@@ -664,29 +1130,83 @@ def index():
             batt_display = f'<span style="color:{color};font-weight:bold">{v:.2f}V</span><br><small>{batt["timestamp"]}</small>'
         else:
             batt_display = '<span style="color:#999">N/A</span>'
+        schedule_config, config_source = get_device_schedule_config(dev_id)
+        if schedule_config:
+            schedule_summary = (
+                f'{schedule_config.get("active_start_hour", "-")}:00-'
+                f'{schedule_config.get("active_end_hour", "-")}:00 '
+                f'@ {schedule_config.get("timezone_offset_minutes", "-")} min'
+            )
+        else:
+            schedule_summary = 'No override'
         device_rows += f"""
         <tr>
             <td><code>{dev_id}</code></td>
             <td><code>{current_name}</code></td>
             <td>{status['total_images']}</td>
             <td>{batt_display}</td>
+            <td><code>{escape(schedule_summary)}</code><br><small>{escape(config_source)}</small></td>
             <td><code>{status['images_dir']}</code></td>
+            <td><a href="/schedule?target={escape(dev_id)}">Edit</a></td>
         </tr>"""
 
     if not device_rows:
-        device_rows = "<tr><td colspan='5'>No devices have connected yet</td></tr>"
+        device_rows = "<tr><td colspan='7'>No devices have connected yet</td></tr>"
 
     return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>E-Ink Image Server</title>
+      <style>
+        body {{ font-family: Arial, sans-serif; max-width: 1180px; margin: 32px auto; padding: 0 16px 48px; background: #f6f7f9; color: #222; }}
+        h1, h2 {{ margin-bottom: 0.4rem; }}
+        .card {{ background: white; border: 1px solid #ddd; border-radius: 8px; padding: 18px; margin-bottom: 16px; }}
+        .row {{ margin-bottom: 14px; }}
+        label {{ display: block; font-weight: bold; margin-bottom: 6px; }}
+        input[type="text"], input[type="number"] {{ width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }}
+        button {{ background: #0b67d0; color: white; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; }}
+        button.danger {{ background: #c43d31; }}
+        .message {{ padding: 12px 14px; border-radius: 6px; margin-bottom: 16px; }}
+        .success {{ background: #e7f6ea; border: 1px solid #9bd0a7; }}
+        .error {{ background: #fdecec; border: 1px solid #e2a4a4; }}
+        .hint {{ color: #555; font-size: 0.95em; }}
+        .schedule-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }}
+        table {{ width: 100%; background: white; border-collapse: collapse; }}
+        th, td {{ border: 1px solid #d9d9d9; padding: 8px; vertical-align: top; text-align: left; }}
+        code, pre {{ background: #eef1f4; border-radius: 4px; }}
+        code {{ padding: 2px 5px; }}
+        pre {{ padding: 12px; overflow-x: auto; }}
+        ul {{ margin-top: 8px; }}
+      </style>
+    </head>
+    <body>
     <h1>E-Ink Image Server (Multi-Device)</h1>
+    {message_html}
+    {error_html}
     <h2>Endpoints</h2>
     <ul>
         <li><a href="/image_packed">/image_packed</a> - Packed binary for ESP32 (960KB, advances rotation)</li>
         <li><a href="/hash">/hash</a> - Image hash for change detection (16 chars)</li>
+        <li><a href="/device_config">/device_config</a> - Current epoch time plus optional schedule overrides</li>
+        <li><a href="/schedule">/schedule</a> - Browser UI for editing schedule overrides</li>
         <li><a href="/current">/current</a> - Current rotation status (JSON)</li>
         <li><a href="/image">/image</a> - Transformed JPEG preview</li>
         <li><a href="/imagejpg">/imagejpg</a> - Random front page image</li>
     </ul>
     <p><em>Endpoints accept <code>X-Device-MAC</code> header for device identification.</em></p>
+
+    <h2>Schedule Shortcuts</h2>
+    <ul>
+        <li><a href="/schedule?target=global">Edit global fallback schedule</a></li>
+        <li><a href="/schedule?target=default">Edit default device schedule</a></li>
+    </ul>
+
+    <h2>Schedule Editor</h2>
+    <div class="schedule-grid">
+    {''.join(schedule_cards)}
+    </div>
 
     <h2>Device Status</h2>
     <table border="1" cellpadding="8" cellspacing="0">
@@ -695,7 +1215,9 @@ def index():
             <th>Current Image</th>
             <th>Total Images</th>
             <th>Battery</th>
+            <th>Effective Schedule</th>
             <th>Images Directory</th>
+            <th>Schedule</th>
         </tr>
         {device_rows}
     </table>
@@ -712,13 +1234,18 @@ def index():
 images/
 ├── default/          # Fallback for unknown devices
 │   ├── image1.jpg
-│   └── image2.png
+│   ├── image2.png
+│   └── device_config.json  # Optional default schedule override
 ├── d0cf1326f7e8/     # Device-specific (MAC without separators)
-│   └── photo.jpg
+│   ├── photo.jpg
+│   └── device_config.json  # Optional per-device override
 └── aabbccddeeff/     # Another device
     └── ...
     </pre>
     <p>Create a directory named after the device's MAC address (lowercase, no separators) to serve device-specific images.</p>
+    <p>Optional schedule overrides live in <code>device_config.json</code> and can set <code>active_start_hour</code>, <code>active_end_hour</code>, <code>timezone_offset_minutes</code>, and <code>refresh_interval_minutes</code>.</p>
+    </body>
+    </html>
     """
 
 

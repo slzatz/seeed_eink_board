@@ -42,6 +42,9 @@ Edit `src/config_manager.h` to set the default image server:
 #define DEFAULT_SERVER_PORT 5000
 #define DEFAULT_IMAGE_ENDPOINT "/image_packed"
 #define DEFAULT_SLEEP_MINUTES 15
+#define DEFAULT_ACTIVE_START_HOUR 8
+#define DEFAULT_ACTIVE_END_HOUR 20
+#define DEFAULT_TIMEZONE_OFFSET_MINUTES 0
 ```
 
 ### 3. Build the Firmware
@@ -76,6 +79,9 @@ uv run python image_server.py
 ```
 
 The server runs on `http://0.0.0.0:5000` with these endpoints:
+- `/device_config` - Current epoch time plus optional schedule overrides
+- `/` - Status page with embedded schedule editors
+- `/schedule` - Focused browser UI for editing schedule overrides
 - `/image_packed` - 960KB binary data for the display
 - `/hash` - 16-character hash for change detection
 - `/image` - JPEG preview
@@ -84,10 +90,12 @@ The server runs on `http://0.0.0.0:5000` with these endpoints:
 
 Press the reset button on the EE02 board. The display should:
 1. Connect to WiFi
-2. Check the image hash
-3. Download the image (if changed)
-4. Refresh the display (takes 20-30 seconds)
-5. Enter deep sleep
+2. Sync current time and optional schedule overrides from `/device_config`
+3. Skip work and go back to sleep if it is currently in quiet hours
+4. Check the image hash
+5. Download the image (if changed)
+6. Refresh the display (takes 20-30 seconds)
+7. Enter deep sleep
 
 ## Monitoring Serial Output
 
@@ -122,6 +130,15 @@ When the ESP32-S3 enters deep sleep, the USB connection is lost. This is normal 
 2. Press the reset button on the board
 3. Output will appear as the device boots
 
+If you want the monitor to reconnect automatically after each sleep cycle:
+
+```bash
+while true; do
+  uv run pio device monitor --port /dev/ttyACM0 --baud 115200
+  sleep 1
+done
+```
+
 ### Example Output
 
 ```
@@ -135,7 +152,9 @@ Current Configuration:
   Server: 192.168.86.34:5000
   Endpoint: /image_packed
   Full URL: http://192.168.86.34:5000/image_packed
-  Sleep: 15 minutes
+  Refresh interval: 15 minutes
+  Active window: 08:00-20:00
+  Timezone offset: 0 minutes from UTC
 
 ========================================
 NORMAL OPERATION MODE
@@ -144,6 +163,9 @@ NORMAL OPERATION MODE
 Connecting to WiFi: YourNetwork
 .
 Connected! IP: 192.168.86.24
+Fetching device config from: http://192.168.86.34:5000/device_config
+Clock synchronized from server epoch: 1772290800
+Clock status: utc=1772290800, local=08:00, active_window=yes
 Checking image hash at: http://192.168.86.34:5000/hash
 Last known hash: (none)
 Server hash: 942d3cfc05c8fa41
@@ -158,7 +180,7 @@ Spectra6: Data transfer complete in 3405 ms
 Spectra6: Sending refresh command (this takes 20-30 seconds)...
 Spectra6: Refresh complete in 28432 ms
 WiFi disconnected
-Entering deep sleep for 15 minutes...
+Entering deep sleep for 15 minutes 0 seconds...
 Going to sleep now...
 ```
 
@@ -170,7 +192,18 @@ Server hash: 942d3cfc05c8fa41
 Image unchanged - skipping download
 Image unchanged - going back to sleep
 WiFi disconnected
-Entering deep sleep for 15 minutes...
+Entering deep sleep for 15 minutes 0 seconds...
+```
+
+When the device wakes during quiet hours:
+```
+Fetching device config from: http://192.168.86.34:5000/device_config
+Clock synchronized from server epoch: 1772337600
+Clock status: utc=1772337600, local=21:00, active_window=no
+Currently in quiet hours - skipping hash/image fetch
+WiFi disconnected
+Outside active window - sleeping until next active start in 39600 seconds
+Entering deep sleep for 660 minutes 0 seconds...
 ```
 
 ## Changing Configuration at Runtime
@@ -198,7 +231,10 @@ The device will enter configuration mode and either:
    - **Server Host**: IP address or domain name (e.g., `192.168.86.34`)
    - **Server Port**: Usually `5000`
    - **Image Endpoint**: Path to the image (e.g., `/image_packed`)
-   - **Sleep Interval**: Minutes between refreshes (1-1440)
+   - **Refresh Interval**: Minutes between wakeups during active hours (1-1440)
+   - **Active Start Hour**: Local hour when image checks begin (0-23)
+   - **Active End Hour**: Local hour when quiet hours begin (0-23)
+   - **Timezone Offset**: Minutes from UTC used for local wall-clock scheduling
 
 3. Click "Save Configuration"
 
@@ -212,6 +248,29 @@ Settings are stored in NVS (Non-Volatile Storage) and persist across:
 - Power loss
 
 To reset to defaults, use the "Reset Defaults" button in the web interface.
+
+### Remote Schedule Overrides
+
+The image server can override the local schedule by serving `device_config.json`.
+
+- Global override: `device_config.json` in the repository root
+- Default device override: `images/default/device_config.json`
+- Per-device override: `images/<mac-address>/device_config.json`
+
+Example:
+
+```json
+{
+  "refresh_interval_minutes": 60,
+  "active_start_hour": 8,
+  "active_end_hour": 20,
+  "timezone_offset_minutes": -480
+}
+```
+
+Only the keys you include are overridden; everything else stays on the device's locally stored configuration.
+
+If you prefer not to edit JSON by hand, start `image_server.py` and open the main page at `http://your-server:5000/`. It includes embedded schedule editors for the global fallback, the default schedule, and each device that has already contacted the server.
 
 ## Troubleshooting
 
@@ -238,7 +297,8 @@ To reset to defaults, use the "Reset Defaults" button in the web interface.
 
 - Check serial output for errors
 - Verify the image server returns valid data: `curl http://localhost:5000/hash`
-- The refresh takes 20-30 seconds - wait for it to complete
+- The refresh takes 20-30 seconds, and the server may need extra time to process a large image before the download starts
+- HEIC files often take longer to process than JPEG or PNG
 
 ### Image appears rotated
 

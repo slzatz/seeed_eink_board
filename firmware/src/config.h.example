@@ -42,8 +42,12 @@
 #define DISPLAY_HEIGHT  1200
 #define BUFFER_SIZE     960000  // (1600 * 1200) / 2 bytes (4bpp)
 
-// HTTP timeout for image fetch (in milliseconds)
+// HTTP timeout for control requests like /hash and /device_config (in milliseconds)
 #define HTTP_TIMEOUT_MS 30000
+
+// HTTP timeout for /image_packed (in milliseconds). The server may need extra
+// time to process the next image before it can start streaming the 960KB body.
+#define IMAGE_HTTP_TIMEOUT_MS 90000
 
 // WiFi connection timeout (in milliseconds)
 #define WIFI_TIMEOUT_MS 30000

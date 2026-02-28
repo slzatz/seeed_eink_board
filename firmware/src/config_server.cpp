@@ -107,13 +107,22 @@ void ConfigServer::handleSave() {
     String portStr = server_.arg("port");
     String endpoint = server_.arg("endpoint");
     String sleepStr = server_.arg("sleep");
+    String activeStartStr = server_.arg("active_start");
+    String activeEndStr = server_.arg("active_end");
+    String timezoneOffsetStr = server_.arg("timezone_offset");
 
     uint16_t port = portStr.toInt();
     uint16_t sleep = sleepStr.toInt();
+    int activeStart = activeStartStr.toInt();
+    int activeEnd = activeEndStr.toInt();
+    int timezoneOffset = timezoneOffsetStr.toInt();
 
     // Validate and save
-    if (host.length() > 0 && port > 0 && endpoint.length() > 0 && sleep > 0) {
-        config_.setConfig(host, port, endpoint, sleep);
+    if (host.length() > 0 && port > 0 && endpoint.length() > 0 && sleep > 0 &&
+        activeStart >= 0 && activeStart <= 23 &&
+        activeEnd >= 0 && activeEnd <= 23 &&
+        timezoneOffset >= -720 && timezoneOffset <= 840) {
+        config_.setConfig(host, port, endpoint, sleep, activeStart, activeEnd, timezoneOffset);
         server_.send(200, "text/html", generateSuccessPage("Configuration saved successfully!"));
     } else {
         server_.send(400, "text/html", generateSuccessPage("Invalid configuration. Please check all fields."));
@@ -127,6 +136,9 @@ void ConfigServer::handleStatus() {
     json += "\"port\":" + String(config_.getServerPort()) + ",";
     json += "\"endpoint\":\"" + config_.getImageEndpoint() + "\",";
     json += "\"sleep_minutes\":" + String(config_.getSleepMinutes()) + ",";
+    json += "\"active_start_hour\":" + String(config_.getActiveStartHour()) + ",";
+    json += "\"active_end_hour\":" + String(config_.getActiveEndHour()) + ",";
+    json += "\"timezone_offset_minutes\":" + String(config_.getTimezoneOffsetMinutes()) + ",";
     json += "\"url\":\"" + config_.getFullURL() + "\"";
     json += "}";
 
@@ -220,11 +232,35 @@ String ConfigServer::generateConfigPage() {
         </div>
 
         <div class="form-group">
-            <label>Sleep Interval (minutes)</label>
+            <label>Refresh Interval (minutes)</label>
             <input type="number" name="sleep" value=")";
     html += String(config_.getSleepMinutes());
     html += R"(" min="1" max="1440" required>
-            <span class="current">How often to wake and refresh (1-1440 min)</span>
+            <span class="current">How often to wake during active hours (1-1440 min)</span>
+        </div>
+
+        <div class="form-group">
+            <label>Active Start Hour</label>
+            <input type="number" name="active_start" value=")";
+    html += String(config_.getActiveStartHour());
+    html += R"(" min="0" max="23" required>
+            <span class="current">Local hour when image checks begin (0-23)</span>
+        </div>
+
+        <div class="form-group">
+            <label>Active End Hour</label>
+            <input type="number" name="active_end" value=")";
+    html += String(config_.getActiveEndHour());
+    html += R"(" min="0" max="23" required>
+            <span class="current">Local hour when quiet hours begin (0-23). Same start/end means always active.</span>
+        </div>
+
+        <div class="form-group">
+            <label>Timezone Offset (minutes from UTC)</label>
+            <input type="number" name="timezone_offset" value=")";
+    html += String(config_.getTimezoneOffsetMinutes());
+    html += R"(" min="-720" max="840" required>
+            <span class="current">Examples: 0=UTC, -300=EST, -480=PST. Server config can override this.</span>
         </div>
 
         <input type="submit" value="Save Configuration">
@@ -234,7 +270,15 @@ String ConfigServer::generateConfigPage() {
         <strong>Current URL:</strong><br>
         <code>)";
     html += config_.getFullURL();
-    html += R"rawliteral(</code>
+    html += R"rawliteral(</code><br>
+        <strong>Local Active Window:</strong> <code>)";
+    html += String(config_.getActiveStartHour());
+    html += R"(:00-)";
+    html += String(config_.getActiveEndHour());
+    html += R"(:00</code><br>
+        <strong>Timezone Offset:</strong> <code>)";
+    html += String(config_.getTimezoneOffsetMinutes());
+    html += R"( min</code>
     </div>
 
     <form action="/reset" method="POST" style="display:inline;">
@@ -249,7 +293,8 @@ String ConfigServer::generateConfigPage() {
         <strong>Instructions:</strong><br>
         1. Enter your image server details above<br>
         2. Click "Save Configuration"<br>
-        3. Click "Reboot Device" to start normal operation<br><br>
+        3. Optional: create a <code>device_config.json</code> file on the image server to override the active window remotely<br>
+        4. Click "Reboot Device" to start normal operation<br><br>
         <strong>To re-enter setup mode later:</strong><br>
         Hold Button 1, then press and release reset, and continue holding Button 1 for an additional second
     </div>

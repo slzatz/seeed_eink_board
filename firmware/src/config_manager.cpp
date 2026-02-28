@@ -6,12 +6,18 @@ static const char* KEY_HOST = "host";
 static const char* KEY_PORT = "port";
 static const char* KEY_ENDPOINT = "endpoint";
 static const char* KEY_SLEEP = "sleep_min";
+static const char* KEY_ACTIVE_START = "active_st";
+static const char* KEY_ACTIVE_END = "active_end";
+static const char* KEY_TZ_OFFSET = "tz_offset";
 
 ConfigManager::ConfigManager()
     : serverHost_(DEFAULT_SERVER_HOST),
       serverPort_(DEFAULT_SERVER_PORT),
       imageEndpoint_(DEFAULT_IMAGE_ENDPOINT),
-      sleepMinutes_(DEFAULT_SLEEP_MINUTES) {
+      sleepMinutes_(DEFAULT_SLEEP_MINUTES),
+      activeStartHour_(DEFAULT_ACTIVE_START_HOUR),
+      activeEndHour_(DEFAULT_ACTIVE_END_HOUR),
+      timezoneOffsetMinutes_(DEFAULT_TIMEZONE_OFFSET_MINUTES) {
 }
 
 void ConfigManager::begin() {
@@ -28,6 +34,9 @@ void ConfigManager::loadFromNVS() {
     serverPort_ = prefs_.getUShort(KEY_PORT, DEFAULT_SERVER_PORT);
     imageEndpoint_ = prefs_.getString(KEY_ENDPOINT, DEFAULT_IMAGE_ENDPOINT);
     sleepMinutes_ = prefs_.getUShort(KEY_SLEEP, DEFAULT_SLEEP_MINUTES);
+    activeStartHour_ = prefs_.getUChar(KEY_ACTIVE_START, DEFAULT_ACTIVE_START_HOUR);
+    activeEndHour_ = prefs_.getUChar(KEY_ACTIVE_END, DEFAULT_ACTIVE_END_HOUR);
+    timezoneOffsetMinutes_ = prefs_.getShort(KEY_TZ_OFFSET, DEFAULT_TIMEZONE_OFFSET_MINUTES);
 
     prefs_.end();
 }
@@ -39,6 +48,9 @@ void ConfigManager::saveToNVS() {
     prefs_.putUShort(KEY_PORT, serverPort_);
     prefs_.putString(KEY_ENDPOINT, imageEndpoint_);
     prefs_.putUShort(KEY_SLEEP, sleepMinutes_);
+    prefs_.putUChar(KEY_ACTIVE_START, activeStartHour_);
+    prefs_.putUChar(KEY_ACTIVE_END, activeEndHour_);
+    prefs_.putShort(KEY_TZ_OFFSET, timezoneOffsetMinutes_);
 
     prefs_.end();
     Serial.println("ConfigManager: Saved to NVS");
@@ -58,6 +70,18 @@ String ConfigManager::getImageEndpoint() {
 
 uint16_t ConfigManager::getSleepMinutes() {
     return sleepMinutes_;
+}
+
+uint8_t ConfigManager::getActiveStartHour() {
+    return activeStartHour_;
+}
+
+uint8_t ConfigManager::getActiveEndHour() {
+    return activeEndHour_;
+}
+
+int16_t ConfigManager::getTimezoneOffsetMinutes() {
+    return timezoneOffsetMinutes_;
 }
 
 String ConfigManager::getFullURL() {
@@ -97,7 +121,30 @@ void ConfigManager::setSleepMinutes(uint16_t minutes) {
     }
 }
 
-void ConfigManager::setConfig(const String& host, uint16_t port, const String& endpoint, uint16_t sleepMinutes) {
+void ConfigManager::setActiveStartHour(uint8_t hour) {
+    if (hour <= 23) {
+        activeStartHour_ = hour;
+        saveToNVS();
+    }
+}
+
+void ConfigManager::setActiveEndHour(uint8_t hour) {
+    if (hour <= 23) {
+        activeEndHour_ = hour;
+        saveToNVS();
+    }
+}
+
+void ConfigManager::setTimezoneOffsetMinutes(int16_t minutes) {
+    if (minutes >= -720 && minutes <= 840) {
+        timezoneOffsetMinutes_ = minutes;
+        saveToNVS();
+    }
+}
+
+void ConfigManager::setConfig(const String& host, uint16_t port, const String& endpoint,
+                              uint16_t sleepMinutes, uint8_t activeStartHour,
+                              uint8_t activeEndHour, int16_t timezoneOffsetMinutes) {
     bool changed = false;
 
     if (host.length() > 0 && host.length() < MAX_HOST_LENGTH) {
@@ -124,6 +171,21 @@ void ConfigManager::setConfig(const String& host, uint16_t port, const String& e
         changed = true;
     }
 
+    if (activeStartHour <= 23) {
+        activeStartHour_ = activeStartHour;
+        changed = true;
+    }
+
+    if (activeEndHour <= 23) {
+        activeEndHour_ = activeEndHour;
+        changed = true;
+    }
+
+    if (timezoneOffsetMinutes >= -720 && timezoneOffsetMinutes <= 840) {
+        timezoneOffsetMinutes_ = timezoneOffsetMinutes;
+        changed = true;
+    }
+
     if (changed) {
         saveToNVS();
     }
@@ -134,6 +196,9 @@ void ConfigManager::resetToDefaults() {
     serverPort_ = DEFAULT_SERVER_PORT;
     imageEndpoint_ = DEFAULT_IMAGE_ENDPOINT;
     sleepMinutes_ = DEFAULT_SLEEP_MINUTES;
+    activeStartHour_ = DEFAULT_ACTIVE_START_HOUR;
+    activeEndHour_ = DEFAULT_ACTIVE_END_HOUR;
+    timezoneOffsetMinutes_ = DEFAULT_TIMEZONE_OFFSET_MINUTES;
     saveToNVS();
     Serial.println("ConfigManager: Reset to defaults");
 }
@@ -143,5 +208,7 @@ void ConfigManager::printConfig() {
     Serial.printf("  Server: %s:%d\n", serverHost_.c_str(), serverPort_);
     Serial.printf("  Endpoint: %s\n", imageEndpoint_.c_str());
     Serial.printf("  Full URL: %s\n", getFullURL().c_str());
-    Serial.printf("  Sleep: %d minutes\n", sleepMinutes_);
+    Serial.printf("  Refresh interval: %d minutes\n", sleepMinutes_);
+    Serial.printf("  Active window: %02d:00-%02d:00\n", activeStartHour_, activeEndHour_);
+    Serial.printf("  Timezone offset: %d minutes from UTC\n", timezoneOffsetMinutes_);
 }
