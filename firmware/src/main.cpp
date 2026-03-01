@@ -9,6 +9,22 @@
 #include "config_manager.h"
 #include "config_server.h"
 
+#ifndef IMAGE_INITIAL_RESPONSE_TIMEOUT_MS
+#if defined(IMAGE_HTTP_TIMEOUT_MS) && (IMAGE_HTTP_TIMEOUT_MS <= 65535)
+#define IMAGE_INITIAL_RESPONSE_TIMEOUT_MS IMAGE_HTTP_TIMEOUT_MS
+#else
+#define IMAGE_INITIAL_RESPONSE_TIMEOUT_MS 60000
+#endif
+#endif
+
+#ifndef IMAGE_STALL_TIMEOUT_MS
+#if defined(IMAGE_HTTP_TIMEOUT_MS) && (IMAGE_HTTP_TIMEOUT_MS <= 65535)
+#define IMAGE_STALL_TIMEOUT_MS IMAGE_HTTP_TIMEOUT_MS
+#else
+#define IMAGE_STALL_TIMEOUT_MS 20000
+#endif
+#endif
+
 // Global instances
 Spectra6Display display;
 ConfigManager configManager;
@@ -227,14 +243,14 @@ bool syncRemoteConfigAndTime() {
     String payload = http.getString();
     http.end();
 
-    StaticJsonDocument<512> doc;
+    JsonDocument doc;
     DeserializationError error = deserializeJson(doc, payload);
     if (error) {
         Serial.printf("Failed to parse device config JSON: %s\n", error.c_str());
         return false;
     }
 
-    if (!doc.containsKey("server_time_epoch")) {
+    if (!doc["server_time_epoch"].is<int64_t>()) {
         Serial.println("Device config missing server_time_epoch");
         return false;
     }
@@ -249,7 +265,7 @@ bool syncRemoteConfigAndTime() {
     int16_t timezoneOffset = configManager.getTimezoneOffsetMinutes();
     bool scheduleChanged = false;
 
-    if (doc.containsKey("refresh_interval_minutes")) {
+    if (doc["refresh_interval_minutes"].is<int>()) {
         int value = doc["refresh_interval_minutes"].as<int>();
         if (value > 0 && value <= 1440 && value != refreshMinutes) {
             refreshMinutes = static_cast<uint16_t>(value);
@@ -257,7 +273,7 @@ bool syncRemoteConfigAndTime() {
         }
     }
 
-    if (doc.containsKey("active_start_hour")) {
+    if (doc["active_start_hour"].is<int>()) {
         int value = doc["active_start_hour"].as<int>();
         if (value >= 0 && value <= 23 && value != activeStart) {
             activeStart = static_cast<uint8_t>(value);
@@ -265,7 +281,7 @@ bool syncRemoteConfigAndTime() {
         }
     }
 
-    if (doc.containsKey("active_end_hour")) {
+    if (doc["active_end_hour"].is<int>()) {
         int value = doc["active_end_hour"].as<int>();
         if (value >= 0 && value <= 23 && value != activeEnd) {
             activeEnd = static_cast<uint8_t>(value);
@@ -273,7 +289,7 @@ bool syncRemoteConfigAndTime() {
         }
     }
 
-    if (doc.containsKey("timezone_offset_minutes")) {
+    if (doc["timezone_offset_minutes"].is<int>()) {
         int value = doc["timezone_offset_minutes"].as<int>();
         if (value >= -720 && value <= 840 && value != timezoneOffset) {
             timezoneOffset = static_cast<int16_t>(value);
@@ -431,7 +447,7 @@ bool fetchAndDisplayImage() {
 
     HTTPClient http;
     http.begin(url);
-    http.setTimeout(IMAGE_HTTP_TIMEOUT_MS);
+    http.setTimeout(IMAGE_INITIAL_RESPONSE_TIMEOUT_MS);
     addCommonHeaders(http);
 
     int httpCode = http.GET();
@@ -484,9 +500,9 @@ bool fetchAndDisplayImage() {
         }
         yield();
 
-        // Treat the timeout as "no data received recently", not total transfer duration.
-        if (millis() - lastDataTime > IMAGE_HTTP_TIMEOUT_MS) {
-            Serial.println("Download stalled - inactivity timeout");
+        // Abort only if the stream stops producing data for too long.
+        if (millis() - lastDataTime > IMAGE_STALL_TIMEOUT_MS) {
+            Serial.printf("Download stalled - no data for %u ms\n", IMAGE_STALL_TIMEOUT_MS);
             break;
         }
     }

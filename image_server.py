@@ -16,7 +16,7 @@ Usage:
     # Server runs on http://0.0.0.0:5000
 """
 
-from flask import Flask, send_file, Response, jsonify, request, redirect
+from flask import Flask, send_file, Response, jsonify, request, redirect, g, has_request_context
 import requests
 import wand.image
 from io import BytesIO
@@ -24,6 +24,8 @@ import random
 import os
 import hashlib
 import json
+import logging
+import time
 from datetime import datetime
 from html import escape
 from urllib.parse import quote_plus
@@ -612,6 +614,49 @@ _battery_status = {}
 _device_network_status = {}
 
 
+def get_request_device_id() -> str | None:
+    """Return the normalized device ID for the current request when available."""
+    if not has_request_context():
+        return None
+
+    device_mac = request.headers.get('X-Device-MAC')
+    if not device_mac:
+        return None
+
+    return normalize_mac(device_mac)
+
+
+def get_request_ip() -> str | None:
+    """Return the remote IP for the current request when available."""
+    if not has_request_context():
+        return None
+
+    return request.remote_addr or 'unknown'
+
+
+def format_log_prefix(device_id: str | None = None, ip_address: str | None = None) -> str:
+    """Build a consistent log prefix for device-scoped request logs."""
+    resolved_device_id = device_id
+    resolved_ip = ip_address
+
+    if has_request_context():
+        resolved_device_id = resolved_device_id or getattr(g, 'device_id', None) or get_request_device_id()
+        resolved_ip = resolved_ip or getattr(g, 'device_ip', None) or get_request_ip()
+
+    if resolved_device_id and resolved_ip:
+        return f"[{resolved_device_id} ({resolved_ip})]"
+    if resolved_device_id:
+        return f"[{resolved_device_id}]"
+    if resolved_ip:
+        return f"[{resolved_ip}]"
+    return "[server]"
+
+
+def log_message(message: str, device_id: str | None = None, ip_address: str | None = None):
+    """Print a log line with a consistent request-aware prefix."""
+    print(f"{format_log_prefix(device_id=device_id, ip_address=ip_address)} {message}")
+
+
 def record_device_request(device_id: str):
     """Track the last IP address and timestamp seen for a device."""
     if device_id == DEFAULT_DEVICE_ID:
@@ -636,9 +681,31 @@ def log_battery_status(device_id: str):
                 'timestamp': datetime.now().isoformat(timespec='seconds')
             }
             level = "LOW" if voltage < 3.3 else "OK" if voltage < 3.7 else "GOOD"
-            print(f"Battery [{device_id}]: {voltage:.2f}V ({level})")
+            log_message(f"Battery: {voltage:.2f}V ({level})", device_id=device_id)
         except ValueError:
             pass
+
+
+@app.before_request
+def prepare_request_logging():
+    """Capture request metadata so all request logs share the same prefix."""
+    g.request_started_at = time.perf_counter()
+    g.device_ip = get_request_ip()
+    g.device_id = get_request_device_id()
+
+
+@app.after_request
+def log_request_summary(response):
+    """Emit a single access log line with device and IP context."""
+    started_at = getattr(g, 'request_started_at', None)
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000) if started_at is not None else 0
+    path = request.full_path[:-1] if request.query_string else request.path
+    log_message(
+        f"{request.method} {path} -> {response.status_code} ({elapsed_ms}ms)",
+        device_id=getattr(g, 'device_id', None),
+        ip_address=getattr(g, 'device_ip', None),
+    )
+    return response
 
 
 def create_palette_image():
@@ -747,7 +814,7 @@ def get_cached_image_data(image_path: str):
         return _image_cache['data'], _image_cache['hash']
 
     # Process the image
-    print(f"Processing image: {image_path}")
+    log_message(f"Processing image: {image_path}")
     packed_data = process_image_to_packed(image_path)
 
     # Compute hash (using first 16 chars of MD5)
@@ -759,7 +826,7 @@ def get_cached_image_data(image_path: str):
     _image_cache['source_path'] = real_path
     _image_cache['source_mtime'] = current_mtime
 
-    print(f"Image processed, hash: {image_hash}")
+    log_message(f"Image processed, hash: {image_hash}")
     return packed_data, image_hash
 
 
@@ -883,21 +950,25 @@ def image_hash():
     device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
     log_battery_status(device_id)
-    print(f"Hash request from device: {device_id}")
+    g.device_id = device_id
+    print(f"{format_log_prefix(device_id=device_id)} Hash request")
 
     image_path = get_pending_image_path(device_id)
     if not image_path:
-        print(f"Hash request: no pending image for device {device_id}")
+        log_message("Hash request: no pending image", device_id=device_id)
         return "No image", 404
 
     try:
         _, hash_value = get_cached_image_data(image_path)
         if hash_value is None:
             return "No image", 404
-        print(f"Hash response for {device_id}: next_image={os.path.basename(image_path)} hash={hash_value}")
+        log_message(
+            f"Hash response: next_image={os.path.basename(image_path)} hash={hash_value}",
+            device_id=device_id,
+        )
         return hash_value
     except Exception as e:
-        print(f"Error getting image hash: {e}")
+        log_message(f"Error getting image hash: {e}", device_id=device_id)
         return f"Error: {e}", 500
 
 
@@ -911,6 +982,7 @@ def device_config():
     """
     device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
+    g.device_id = None if device_id == DEFAULT_DEVICE_ID else device_id
     log_battery_status(device_id)
 
     schedule_config, config_source = get_device_schedule_config(device_id)
@@ -921,6 +993,13 @@ def device_config():
         'config_source': config_source,
     }
     payload.update(schedule_config)
+
+    log_message(
+        f"Device config: refresh_interval_minutes={payload.get('refresh_interval_minutes')} "
+        f"active_hours={payload.get('active_start_hour')}-{payload.get('active_end_hour')} "
+        f"timezone_offset_minutes={payload.get('timezone_offset_minutes')}",
+        device_id=g.device_id,
+    )
 
     return jsonify(payload)
 
@@ -984,7 +1063,8 @@ def image_packed():
     device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
     log_battery_status(device_id)
-    print(f"Image request from device: {device_id}")
+    g.device_id = device_id
+    print(f"{format_log_prefix(device_id=device_id)} Image request")
 
     # Resolve the next image without advancing so /hash and /image_packed stay in sync.
     image_path = get_pending_image_path(device_id)
@@ -998,9 +1078,9 @@ def image_packed():
 
         image_name = os.path.basename(image_path)
         _rotator.mark_image_served(device_id)
-        print(
-            f"Image response for {device_id}: "
-            f"image={image_name} hash={image_hash} bytes={len(packed_data)}"
+        log_message(
+            f"Image response: image={image_name} hash={image_hash} bytes={len(packed_data)}",
+            device_id=device_id,
         )
 
         return Response(
@@ -1015,7 +1095,7 @@ def image_packed():
             }
         )
     except Exception as e:
-        print(f"Error processing image: {e}")
+        log_message(f"Error processing image: {e}", device_id=device_id)
         return f"Error: {e}", 500
 
 
@@ -1250,6 +1330,7 @@ images/
 
 
 if __name__ == "__main__":
+    logging.getLogger('werkzeug').disabled = True
     print("Starting E-Ink Image Server (Multi-Device)...")
     print(f"PIL available: {PIL_AVAILABLE}")
     print(f"HEIC support: {HEIC_SUPPORT}")

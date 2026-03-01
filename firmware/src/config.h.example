@@ -45,9 +45,14 @@
 // HTTP timeout for control requests like /hash and /device_config (in milliseconds)
 #define HTTP_TIMEOUT_MS 30000
 
-// HTTP timeout for /image_packed (in milliseconds). The server may need extra
-// time to process the next image before it can start streaming the 960KB body.
-#define IMAGE_HTTP_TIMEOUT_MS 90000
+// How long to wait for /image_packed to start responding (in milliseconds).
+// The server may need extra time to process the next image before it can start
+// streaming the 960KB body. Keep this <= 65535 because HTTPClient::setTimeout()
+// takes a 16-bit millisecond value in this environment.
+#define IMAGE_INITIAL_RESPONSE_TIMEOUT_MS 60000
+
+// How long to tolerate no incoming image bytes once the transfer is underway.
+#define IMAGE_STALL_TIMEOUT_MS 20000
 
 // WiFi connection timeout (in milliseconds)
 #define WIFI_TIMEOUT_MS 30000
