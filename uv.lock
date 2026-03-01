@@ -339,7 +339,7 @@ wheels = [
 
 [[package]]
 name = "platformio"
-version = "6.1.18"
+version = "6.1.19"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "ajsonrpc" },
@@ -357,9 +357,9 @@ dependencies = [
     { name = "uvicorn" },
     { name = "wsproto" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2f/c5/ba3c1ba120b0466bb621615e4075a5c4752400c6adbf2a15edd91b9aefe9/platformio-6.1.18.tar.gz", hash = "sha256:6ea19c66fba3c5272378afa6ae11abbf883243dd8e503ac5f4ff8ac277ccc7c6", size = 239977, upload-time = "2025-03-11T20:00:39.319Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3d/a8/e5a87ead3e0c25c054fa9dbfcc5e3ad3bca5b830f691fea820ca618fcc3e/platformio-6.1.19.tar.gz", hash = "sha256:7b53eaa36fcba554411b669eab845626da7c4b90fa6aaee9fe9f1875d82f5f54", size = 240844, upload-time = "2026-02-04T13:40:59.523Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/25/e6a3bf27ddc146f5a48a50f17e54cac5f3fd88c8474228791df4e0d031a8/platformio-6.1.18-py3-none-any.whl", hash = "sha256:94ef70a242ddcb93e020b0250c4f61e65b347411e8dfe36f79efb759c09324fa", size = 420089, upload-time = "2025-03-11T20:00:37.67Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/15/ecb78457241aef59977cafe52b521ed99c7f42e78016d55bbaa953a2b6ae/platformio-6.1.19-py3-none-any.whl", hash = "sha256:4f93b00cf2759035d76ebece4840a3274096f7343ee5bba56cbc0bc3ce2eb6f5", size = 421133, upload-time = "2026-02-04T13:40:56.306Z" },
 ]
 
 [[package]]
