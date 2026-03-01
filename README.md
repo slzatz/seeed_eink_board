@@ -490,7 +490,7 @@ seeed_eink_board/
 4. Requests `/device_config` from server to sync time and optional schedule overrides
 5. If local time is outside the active window: go back to deep sleep until the next start hour
 6. Requests `/hash` from server (small request to check if image changed)
-   - Sends X-Device-MAC and X-Battery-Voltage headers
+   - Every server request includes `X-Device-MAC` and `X-Battery-Voltage` headers
 7. If hash matches previous: go back to sleep (saves battery!)
 8. If hash is different: download `/image_packed` (960KB)
 9. Send data to e-ink display
@@ -502,7 +502,7 @@ seeed_eink_board/
 
 ## Battery Monitoring
 
-The firmware reads battery voltage on each wake cycle and sends it to the image server via the `X-Battery-Voltage` HTTP header. The server logs voltage levels and displays them on the status page at `http://your-server:5000/`.
+The firmware reads battery voltage on each wake cycle and sends it to the image server via the `X-Battery-Voltage` HTTP header on every request. The server records the latest value for device status and logs one battery line at the start of each wake cycle during `/device_config`. Server logs also include wall-clock timestamps plus the device MAC/IP prefix to make multi-device activity easier to follow.
 
 ### Voltage Levels
 
