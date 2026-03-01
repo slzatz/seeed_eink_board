@@ -638,18 +638,19 @@ def format_log_prefix(device_id: str | None = None, ip_address: str | None = Non
     """Build a consistent log prefix for device-scoped request logs."""
     resolved_device_id = device_id
     resolved_ip = ip_address
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if has_request_context():
         resolved_device_id = resolved_device_id or getattr(g, 'device_id', None) or get_request_device_id()
         resolved_ip = resolved_ip or getattr(g, 'device_ip', None) or get_request_ip()
 
     if resolved_device_id and resolved_ip:
-        return f"[{resolved_device_id} ({resolved_ip})]"
+        return f"[{timestamp}] [{resolved_device_id} ({resolved_ip})]"
     if resolved_device_id:
-        return f"[{resolved_device_id}]"
+        return f"[{timestamp}] [{resolved_device_id}]"
     if resolved_ip:
-        return f"[{resolved_ip}]"
-    return "[server]"
+        return f"[{timestamp}] [{resolved_ip}]"
+    return f"[{timestamp}] [server]"
 
 
 def log_message(message: str, device_id: str | None = None, ip_address: str | None = None):
@@ -668,8 +669,8 @@ def record_device_request(device_id: str):
     }
 
 
-def log_battery_status(device_id: str):
-    """Extract battery voltage from request header and log it."""
+def log_battery_status(device_id: str, emit_log: bool = False):
+    """Extract battery voltage from request header and optionally log it."""
     record_device_request(device_id)
 
     voltage_str = request.headers.get('X-Battery-Voltage')
@@ -680,8 +681,9 @@ def log_battery_status(device_id: str):
                 'voltage': voltage,
                 'timestamp': datetime.now().isoformat(timespec='seconds')
             }
-            level = "LOW" if voltage < 3.3 else "OK" if voltage < 3.7 else "GOOD"
-            log_message(f"Battery: {voltage:.2f}V ({level})", device_id=device_id)
+            if emit_log:
+                level = "LOW" if voltage < 3.3 else "OK" if voltage < 3.7 else "GOOD"
+                log_message(f"Battery: {voltage:.2f}V ({level})", device_id=device_id)
         except ValueError:
             pass
 
@@ -951,7 +953,7 @@ def image_hash():
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
     log_battery_status(device_id)
     g.device_id = device_id
-    print(f"{format_log_prefix(device_id=device_id)} Hash request")
+    log_message("Hash request", device_id=device_id)
 
     image_path = get_pending_image_path(device_id)
     if not image_path:
@@ -983,7 +985,7 @@ def device_config():
     device_mac = request.headers.get('X-Device-MAC', DEFAULT_DEVICE_ID)
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
     g.device_id = None if device_id == DEFAULT_DEVICE_ID else device_id
-    log_battery_status(device_id)
+    log_battery_status(device_id, emit_log=True)
 
     schedule_config, config_source = get_device_schedule_config(device_id)
 
@@ -1064,7 +1066,7 @@ def image_packed():
     device_id = normalize_mac(device_mac) if device_mac != DEFAULT_DEVICE_ID else DEFAULT_DEVICE_ID
     log_battery_status(device_id)
     g.device_id = device_id
-    print(f"{format_log_prefix(device_id=device_id)} Image request")
+    log_message("Image request", device_id=device_id)
 
     # Resolve the next image without advancing so /hash and /image_packed stay in sync.
     image_path = get_pending_image_path(device_id)
