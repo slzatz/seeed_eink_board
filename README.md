@@ -2,17 +2,15 @@
 
 Display images on a 13.3" Spectra 6 color e-ink display using custom firmware for the Seeed Studio XIAO ePaper Display Board (EE02).
 
-This would not have happened without the esphome EE02 firmware display driver created by [esphome-bigink](https://github.com/acegallagher/esphome-bigink)
-
 ##  So what does this project do
 
-Replaces the Seeed factoryi-installed firmware on the EE02 board with custom firmware that:
+Replaces the Seeed factory-installed firmware on the EE02 board with custom firmware that:
 
 1. Connects to your WiFi network
-2. Fetches images from a simple server that you can run locally or on a remote server
+2. Wakes up from deep sleep to fetch an image from an image server that you can run locally or on a remote server
 3. Displays the image on a spectra 6 eink screen
-4. Goes to sleep to conserve battery (can vary sleep interval)
-5. Can skip wakeups during configurable quiet hours
+4. Goes back to sleep to conserve battery (can vary sleep interval)
+5. Skips wakeups during configurable quiet hours (like overnight when no one is seeing the display)
 6. Wakes up periodically to check for new images and only refreshes the image if it has changed
 
 ---
@@ -90,7 +88,7 @@ macOS:
 ipconfig getifaddr en0
 ```
 
-You want the address on your local network, usually something like `192.168.x.x`.
+The address can be on your local network or a remote server depending on where you want to run the image server.
 
 ### Step 6: Configure the Image Server Address
 
@@ -101,7 +99,7 @@ Edit `firmware/src/config_manager.h`:
 Find this line and change the IP address to your server's IP:
 
 ```cpp
-#define DEFAULT_SERVER_HOST "192.168.86.33"  // Change this to your IP
+#define DEFAULT_SERVER_HOST "192.168.86.33"  // Change this to your image server's IP address
 ```
 
 The other settings should be fine:
@@ -147,7 +145,7 @@ ls /dev/cu.usb*
 
 You should see something like `/dev/ttyACM0` (Linux), `/dev/cu.usbmodem14101` (macOS), or `COM3` (Windows).
 
-You'll probably have to Press the reset button (#4)on the board. The device does not seem to have a separate BOOT button.
+You'll probably have to Press the reset button (#4) on the board to upload the firmware.
 
 ### Step 9: Flash the Firmware
 
@@ -181,9 +179,7 @@ cp your_photo.jpg images/default/
 
 Images will be automatically resized and converted to the display's 6-color palette. You can add multiple images and they will rotate on each refresh.
 
-JPEG and PNG are the safest choices. HEIC is supported if the required Python package is installed, but it can take longer for the server to process.
-
-For device-specific images, see the "Support for multiple boards with different image collections" section below.
+JPEG, PNG and HEIC are suppported.
 
 Optional: add a schedule override file so frames only wake during the hours you care about:
 
@@ -234,11 +230,11 @@ The display should:
 2. Sync current time and any schedule overrides from the server
 3. Download the image if needed
 4. Refresh the display (usually 20-30 seconds of flickering)
-5. Go to sleep, potentially until the next active window
+5. Go to sleep
 
 Do not worry if the first image takes a while. The server may spend extra time resizing and converting a large image before it starts sending the 960 KB packed display buffer.
 
-**Congratulations! (if that actually worked)** Your e-ink display is now showing your image!
+**Congratulations! (if that actually worked)** Your e-ink display should be showing your image. 
 
 ---
 
@@ -337,7 +333,9 @@ You can change the server address, sleep interval, and other settings without re
 3. Continue holding Button 1 for an additional second
 4. Release Button 1 - the device will enter configuration mode
 
-### Using the Web Configuration Interface
+### Using the Web Configuration Interface to the EE02 Board
+
+The on-board firmware includes a simple web server for configuration when in config mode. It is generally easier to use the image server to make configuration changes but one reason to use the web interface to the EEO2 board is if you move the image server or change the port, you can enter the new values through this interface. 
 
 1. Connect to your WiFi network
 2. The serial monitor will show the device's IP address
@@ -519,4 +517,4 @@ Battery status is visible on the server index page and in the `/current` JSON en
 
 ## Credits
 
-- Firmware display driver based on [esphome-bigink](https://github.com/acegallagher/esphome-bigink)
+- Firmware display driver inspired by [esphome-bigink](https://github.com/acegallagher/esphome-bigink)
